@@ -29,7 +29,8 @@ The decompiler (every crate except the eval harness's bookkeeping) may read ONLY
    file get an automatic context of header includes chosen from the module's symbol names.
 4. The **compiler** (`build/compilers/<version>/mwcceppc.exe`, the unit's version) as an oracle it
    may run as often as it likes, and anything learned by reverse engineering it (experiments with
-   the compiler, observing the unmodified compiler under a debugger).
+   the compiler, observing the unmodified compiler under a debugger or its WebAssembly build
+   with mwcc-tools' trace hooks).
 
 Forbidden: reading `src/**/*.cpp` bodies, git history, report.json source paths for content,
 any table keyed by function name/address that maps to source text, `asm { }` / `asm` functions,
@@ -374,7 +375,8 @@ no compiler. All compiler use is concentrated in mwdec-mwcc (candidate compiles,
   target register holds a param, temp or named local), `sched` / `schedcheck` / `explain`
   (list scheduler pick rule; whether an order difference is forced by a dependence, by register
   reuse, or by statement order), `iro` (the front-end optimizer's own dump), `tracer` (the
-  unmodified compiler under a minimal debugger: inliner decisions, colouring, PCode). The models
+  compiler's own records, or the unmodified compiler under a minimal debugger: inliner decisions,
+  colouring, PCode). The models
   are validated against the real compiler on generated functions (`ra-fuzz`, `ra-simplify`,
   `sched-alias-check`) and, source-free, on train-split target code (`ra-scan`,
   `ra-spill-scan`); the reasoning behind them lives in those modules' docs.

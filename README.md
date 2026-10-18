@@ -6,7 +6,7 @@ This repository holds the decompiler code only. It contains no game code or data
 
 Build: `cargo build --release`, binary `mwdec`.
 
-Compiler: GC 2.6 / 2.7 compiles run in process as WebAssembly: the compiler mwcc-tools builds from its sources (`build/GC_2_7/wasm/mwcceppc.wasm`), run by its `mwcc-wasm` crate (a path dependency on the mwcc-tools checkout at `../mwcc`; `MWDEC_MWCC_TOOLS` names another checkout to take the modules from). No process is started per compile, and the objects are the executable's. Without the module, for other compilers, and with `MWDEC_WASM=0`, the executable runs. The persistent-compiler fast path (`MWDEC_PERSIST`) runs in process too, in `persist.wasm` (parse the context once, compile each candidate from a snapshot), when that module is built; otherwise it debugs a compiler process. The tracer still runs the executable.
+Compiler: GC 2.6 / 2.7 compiles run in process as WebAssembly: the compiler mwcc-tools builds from its sources (`build/GC_2_7/wasm/mwcceppc.wasm`), run by its `mwcc-wasm` crate (a path dependency on the mwcc-tools checkout at `../mwcc`; `MWDEC_MWCC_TOOLS` names another checkout to take the modules from). No process is started per compile, and the objects are the executable's. Without the module, for other compilers, and with `MWDEC_WASM=0`, the executable runs. The persistent-compiler fast path (`MWDEC_PERSIST`) runs in process too, in `persist.wasm` (parse the context once, compile each candidate from a snapshot), when that module is built; otherwise it debugs a compiler process. The tracer reads the records the oracle module (`oracle.wasm`, the compiler with mwcc-tools' trace hooks) writes, in process, when that module is built; otherwise it runs the executable under a debugger.
 
 ## How it works
 

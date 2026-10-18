@@ -1,6 +1,9 @@
-//! Real-compiler tracer: runs the unmodified GC/2.7 `mwcceppc.exe` under a minimal Win32 debugger
-//! (WOW64, int3 breakpoints in the debuggee's memory only) and reads the compiler's own data
-//! structures at chosen points:
+//! Real-compiler tracer. When mwcc-tools' oracle module is built ([`crate::wasm::oracle_available`]),
+//! the compiler with its trace hooks runs in process and its records are read
+//! ([`crate::oracle_trace`]); otherwise, and with [`Backend::Debugger`], it runs the unmodified
+//! GC/2.7 `mwcceppc.exe` under a minimal Win32 debugger (WOW64, int3 breakpoints in the debuggee's
+//! memory only) and reads the compiler's own data structures at chosen points. Both give the same
+//! [`Trace`] (`trace-parity` compares them):
 //!
 //! - **inliner**: every `CInline_InlineFunctionCheck` decision (caller, callee, expansion level,
 //!   estimated cost vs `inline_max_size`, result and the code path that decided it), and the order
@@ -93,6 +96,9 @@ pub const PEEPHOLE_RULES: &[(u32, &str)] = &[
     (0x507030, "unlink_vmr_matching_source"),
     (0x5070f0, "unlink_unmatched_fmr"),
     (0x5071b0, "unlink_mr_with_matching_def"),
+    (0x507270, "unlink_same_reg_move"),
+    (0x5072b0, "unlink_same_reg_instruction"),
+    (0x5072f0, "unlink_equal_reg_instruction"),
     (0x507330, "peephole_rule_507330"),
 ];
 const A_IRO_DUMP_FLAG: u32 = 0x5ef3b9; // u8; cleared by the optimizer setup just before the opener
@@ -464,10 +470,35 @@ pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Which tracer records a compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// The oracle module when it is built, else the debugger (`MWDEC_TRACER=debugger`: the debugger).
+    Auto,
+    /// The executable under the debugger.
+    Debugger,
+    /// The oracle module, in process ([`crate::oracle_trace`]).
+    Oracle,
+}
+
 /// Trace one compile of `source` with the compiler's flag profile.
 pub fn trace_source(comp: &Compiler, source: &str, opts: &TraceOptions) -> Result<Trace> {
+    trace_source_with(comp, source, opts, Backend::Auto)
+}
+
+/// Trace one compile of `source` with the tracer `backend`.
+pub fn trace_source_with(comp: &Compiler, source: &str, opts: &TraceOptions, backend: Backend) -> Result<Trace> {
     let ver = comp.version.clone().unwrap_or_else(|| comp.profile.version().to_string());
-    if ver != "GC/2.7" {
+    let exe = comp.exe();
+    let oracle = match backend {
+        Backend::Debugger => false,
+        Backend::Oracle => true,
+        Backend::Auto => {
+            std::env::var("MWDEC_TRACER").map_or(true, |t| t != "debugger") && crate::wasm::oracle_available(&exe)
+        }
+    };
+    let _p = mwdec_core::prof::span(if oracle { "tracer.oracle" } else { "tracer.debugger" });
+    if !oracle && ver != "GC/2.7" {
         bail!("tracer address table only exists for GC/2.7 (got {ver})");
     }
     std::fs::create_dir_all(&comp.work)?;
@@ -478,7 +509,27 @@ pub fn trace_source(comp: &Compiler, source: &str, opts: &TraceOptions) -> Resul
     let src = comp.work.join(format!("{stem}.{ext}"));
     let obj = comp.work.join(format!("{stem}.o"));
     std::fs::write(&src, source)?;
-    let mut parts = vec![quote_arg(&comp.exe().to_string_lossy().replace('/', "\\"))];
+    if oracle {
+        let mut args = comp.flags();
+        args.extend(["-c".into(), src.to_string_lossy().into_owned(), "-o".into(), obj.to_string_lossy().into_owned()]);
+        let log = comp.work.join(format!("{stem}.log"));
+        let variables = crate::oracle_trace::variables(opts, &log);
+        let run = crate::wasm::run_oracle(&exe, &args, &comp.work, std::time::Duration::from_secs(300), &variables);
+        let _ = std::fs::remove_file(&src);
+        let run = run.with_context(|| format!("tracer: {} has no oracle module", exe.display()))??;
+        if run.timed_out {
+            bail!("tracer: timeout waiting for the compiler");
+        }
+        let mut trace = crate::oracle_trace::parse(&run.trace, opts);
+        if opts.iro {
+            trace.iro = std::fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        }
+        let _ = std::fs::remove_file(&log);
+        trace.object = std::fs::read(&obj).with_context(|| "tracer: compiler produced no object (compile error?)")?;
+        let _ = std::fs::remove_file(&obj);
+        return Ok(trace);
+    }
+    let mut parts = vec![quote_arg(&exe.to_string_lossy().replace('/', "\\"))];
     parts.extend(comp.flags().iter().map(|f| quote_arg(f)));
     parts.push("-c".into());
     parts.push(quote_arg(&src.to_string_lossy()));
@@ -1007,12 +1058,12 @@ fn handle_bp(
 
 /// One rendered PCode instruction plus its register operands (for dependence classification).
 #[derive(Clone, Debug, Default)]
-struct PInstr {
-    op: i16,
-    name: String,
-    text: String,
+pub(crate) struct PInstr {
+    pub(crate) op: i16,
+    pub(crate) name: String,
+    pub(crate) text: String,
     /// (class, reg, read, write)
-    regs: Vec<(u8, i16, bool, bool)>,
+    pub(crate) regs: Vec<(u8, i16, bool, bool)>,
 }
 
 /// Render the PCode at `p` (operands: `r35`/`f32` registers, `=` = written only, `#imm`,
@@ -1033,9 +1084,23 @@ fn pcode_at(d: &mut Debuggee, p: u32, opnames: &mut HashMap<i16, String>) -> Opt
         })
         .clone();
     let raw = d.read(p + 0x24, 12 * argc as usize).unwrap_or_default();
+    let flags = u32::from_le_bytes([h[0x14], h[0x15], h[0x16], h[0x17]]);
+    Some((render_pcode(op, argc, flags, &raw, name, |obj| d.obj_name(obj)), next))
+}
+
+/// Render one PCode instruction: opcode `op` named `name`, its flags word (0x14) and its `argc` 12-byte operands
+/// `raw`, with `object` naming the objects operands refer to.
+pub(crate) fn render_pcode(
+    op: i16,
+    argc: i16,
+    flags: u32,
+    raw: &[u8],
+    name: String,
+    mut object: impl FnMut(u32) -> String,
+) -> PInstr {
     let mut args = vec![];
     let mut regs = vec![];
-    for k in 0..argc as usize {
+    for k in 0..(argc as usize).min(raw.len() / 12) {
         let a = &raw[12 * k..12 * k + 12];
         let (kind, cls) = (a[0], a[1]);
         let eff = u16::from_le_bytes([a[2], a[3]]);
@@ -1056,7 +1121,7 @@ fn pcode_at(d: &mut Debuggee, p: u32, opnames: &mut HashMap<i16, String>) -> Opt
             2 => format!("#{imm}"),
             3 => {
                 let obj = u32::from_le_bytes([a[6], a[7], a[8], a[9]]);
-                let n = if obj == 0 { "?".to_string() } else { d.obj_name(obj) };
+                let n = if obj == 0 { "?".to_string() } else { object(obj) };
                 if imm == 0 {
                     n
                 } else {
@@ -1078,15 +1143,14 @@ fn pcode_at(d: &mut Debuggee, p: u32, opnames: &mut HashMap<i16, String>) -> Opt
     // stack/global object, or the pointee of a pointer-to-const parameter: never ordered against
     // the register saves)
     if std::env::var_os("MWDEC_PCODE_FLAGS").is_some() && args.iter().any(|a| a.starts_with('#') || a.contains('+')) && (name.starts_with('l') || name.starts_with("st") || name.starts_with("psq")) && !matches!(name.as_str(), "li" | "lis") {
-        let fl = u32::from_le_bytes([h[0x14], h[0x15], h[0x16], h[0x17]]);
-        if fl & 0x20 != 0 {
+        if flags & 0x20 != 0 {
             text.push_str(" {ptr}");
         }
-        if fl & 0x40 != 0 {
+        if flags & 0x40 != 0 {
             text.push_str(" {const}");
         }
     }
-    Some((PInstr { op, name, text, regs }, next))
+    PInstr { op, name, text, regs }
 }
 
 /// Walk pcbasicblocks and render the PCode with virtual registers.

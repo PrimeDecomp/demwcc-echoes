@@ -5,6 +5,8 @@
 //! - [`run`] runs an executable's module when it has one (`None` otherwise: run the executable).
 //! - [`Persistent`] parses a context once and compiles many candidates after it, in the compiler built for that
 //!   (`persist.wasm`): the fast path's persistent compilers ([`crate::persist::compile_cached`]).
+//! - [`run_oracle`] runs the compiler with mwcc-tools' trace hooks (`oracle.wasm`): the tracer
+//!   ([`crate::oracle_trace`]).
 //! - The modules are found in the mwcc-tools checkout `MWDEC_MWCC_TOOLS`, by default the one this crate was built
 //!   against (next to this checkout). `MWDEC_WASM=0` turns it off.
 //! - Each module is loaded once per process, from the compiled artifact the first process to load it wrote under
@@ -45,7 +47,7 @@ fn mwcc_tools() -> PathBuf {
     }
 }
 
-/// The module `name` (`mwcceppc`, `persist`) of the compiler `exe` (`.../GC/2.7/mwcceppc.exe`), if mwcc-tools
+/// The module `name` (`mwcceppc`, `persist`, `oracle`) of the compiler `exe` (`.../GC/2.7/mwcceppc.exe`), if mwcc-tools
 /// builds one for its version.
 fn module_named(exe: &Path, name: &str) -> Option<PathBuf> {
     let file = exe.file_name()?.to_str()?;
@@ -111,18 +113,82 @@ pub fn run(exe: &Path, args: &[String], directory: &Path, timeout: Duration) -> 
         return None;
     }
     let loaded = loaded(exe)?;
+    let environment: Vec<(String, String)> = std::env::vars().collect();
+    Some(execute(&loaded, exe, args, directory, timeout, &environment).map(|o| Run {
+        exit_code: o.exit_code,
+        console: o.console.iter().map(|b| char::from(*b)).collect(),
+        timed_out: o.timed_out || o.cancelled,
+    }))
+}
+
+/// One run of the oracle module: the compiler with mwcc-tools' trace hooks linked in (`oracle.wasm`).
+pub struct Traced {
+    pub exit_code: i32,
+    /// The compiler's messages (its stdout).
+    pub messages: String,
+    /// The trace records, one a line (its stderr, with the driver's few lines of its own).
+    pub trace: String,
+    pub timed_out: bool,
+}
+
+/// Whether `exe` has an oracle module with every record the tracer reads ([`crate::oracle_trace`]): an older one
+/// lacks the last of them, the peephole's (its format is in the module's data).
+pub fn oracle_available(exe: &Path) -> bool {
+    static TRACES: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    if disabled_by_env() {
+        return false;
+    }
+    let Some(module) = module_named(exe, "oracle") else { return false };
+    let traces = *TRACES.get_or_init(Default::default).lock().unwrap().entry(module.clone()).or_insert_with(|| {
+        std::fs::read(&module).is_ok_and(|m| m.windows(12).any(|w| w == b"ph.hit rule="))
+    });
+    traces && loaded_module(exe, module).is_some()
+}
+
+/// Run the oracle module of `exe` with the traces `traces` on (`MWCC_ORACLE_*` variables and their values); `None`:
+/// it has none. The records go to the compiler's stderr, which stays in memory: a trace file would be written a
+/// fragment of a record at a time.
+pub fn run_oracle(
+    exe: &Path,
+    args: &[String],
+    directory: &Path,
+    timeout: Duration,
+    traces: &[(&str, String)],
+) -> Option<Result<Traced>> {
+    if disabled_by_env() {
+        return None;
+    }
+    let loaded = loaded_module(exe, module_named(exe, "oracle")?)?;
+    let mut environment: Vec<(String, String)> =
+        std::env::vars().filter(|(k, _)| !k.starts_with("MWCC_ORACLE_")).collect();
+    environment.extend(traces.iter().map(|(k, v)| (k.to_string(), v.clone())));
+    Some(execute(&loaded, exe, args, directory, timeout, &environment).map(|o| Traced {
+        exit_code: o.exit_code,
+        messages: o.stdout.iter().map(|b| char::from(*b)).collect(),
+        trace: String::from_utf8_lossy(&o.stderr).into_owned(),
+        timed_out: o.timed_out || o.cancelled,
+    }))
+}
+
+fn execute(
+    loaded: &Loaded,
+    exe: &Path,
+    args: &[String],
+    directory: &Path,
+    timeout: Duration,
+    environment: &[(String, String)],
+) -> Result<mwcc_wasm::Outcome> {
     let program = std::path::absolute(exe).unwrap_or_else(|_| exe.to_path_buf()).to_string_lossy().into_owned();
     let directory = std::path::absolute(directory).unwrap_or_else(|_| directory.to_path_buf());
-    let environment: Vec<(String, String)> = std::env::vars().collect();
     // (a thread of its own, with room for the compiler's recursion)
-    let outcome = std::thread::scope(|s| {
+    std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn_scoped(s, || {
                 loaded.compiler.run(&mwcc_wasm::Request {
                     args,
                     directory: &directory,
-                    environment: &environment,
+                    environment,
                     program: &program,
                     version_info: &loaded.version_info,
                     timeout: Some(timeout),
@@ -133,12 +199,7 @@ pub fn run(exe: &Path, args: &[String], directory: &Path, timeout: Duration) -> 
             .join()
             .map_err(|_| anyhow!("the in-process compiler panicked"))?
             .map_err(|e| anyhow!("{e:?}"))
-    });
-    Some(outcome.map(|o| Run {
-        exit_code: o.exit_code,
-        console: o.console.iter().map(|b| char::from(*b)).collect(),
-        timed_out: o.timed_out || o.cancelled,
-    }))
+    })
 }
 
 /// A persistent compile: the compiler stopped after a context, compiling each candidate after it from a snapshot of

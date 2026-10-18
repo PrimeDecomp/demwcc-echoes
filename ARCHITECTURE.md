@@ -64,8 +64,10 @@ matches and rewrites (`matcher`). `ProbeCache` keeps templates on disk across un
 **`mwdec-oracle`**: compiler experiments and models, independent of the drafter. Library:
 `compile::Compiler` + `flags::profile_flags`, `asm` (annotated listings), `variants` (experiment
 files with checked expectations), `webs`, `regalloc`, `hints`, `sched`, `schedcheck`, `explain`,
-`iro`, `tracer` (the unmodified compiler under a minimal debugger). Binaries: `mwcc-oracle`
-(asm / trace / inline / iro front end) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,
+`iro`, `tracer` (the compiler's decisions: `oracle_trace` reads the records of mwcc-tools' oracle
+module, in process; without it, the unmodified compiler under a minimal debugger). Binaries:
+`mwcc-oracle` (asm / trace / inline / iro front end), `trace-parity` (both tracers on the same
+sources, compared field by field) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,
 `ra-spill-scan`, `explain-check`, `sched-alias-check`.
 
 **`mwdec-search`**: the compiler-in-the-loop permuter. `search(&Scorer, init, &SearchConfig) ->
