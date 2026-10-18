@@ -14,12 +14,14 @@ pub fn project_root() -> PathBuf {
     PathBuf::from(option_env!("MWDEC_DEFAULT_ROOT").unwrap_or("."))
 }
 
-/// Base directory for scratch output (compiles, caches, eval logs).
+/// Base directory for scratch output (compiles, caches, eval logs), made absolute: compiles run in
+/// other directories.
 pub fn work_base() -> PathBuf {
-    if let Some(p) = std::env::var_os("MWDEC_WORK_BASE") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from(option_env!("MWDEC_DEFAULT_WORK_BASE").unwrap_or("mwdec-work"))
+    let base = match std::env::var_os("MWDEC_WORK_BASE") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(option_env!("MWDEC_DEFAULT_WORK_BASE").unwrap_or("mwdec-work")),
+    };
+    std::path::absolute(&base).unwrap_or(base)
 }
 
 /// `work_base()/<sub>`.

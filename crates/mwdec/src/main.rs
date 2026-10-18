@@ -292,7 +292,11 @@ fn main() -> Result<()> {
 }
 
 fn real_main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // (compiles run in other directories, so the paths given are made absolute here)
+    for path in [&mut cli.root, &mut cli.work].into_iter().flatten() {
+        *path = std::path::absolute(&*path)?;
+    }
     // (an explicit root is the root everywhere: the TypeDb builds and other defaults follow
     // `MWDEC_ROOT`, and so do the processes this one starts)
     if let Some(r) = &cli.root {
