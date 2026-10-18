@@ -23,3 +23,7 @@ target, and applies source-level mutations until the object is identical or the 
 
 - [DESIGN.md](DESIGN.md): the representations from object bytes to C++, pass order and layering, anti-cheat rules, the strict comparator (what a match means), the train/test split, the CLI.
 - [ARCHITECTURE.md](ARCHITECTURE.md): what each crate does, the dependency graph, data flow of the main commands, caches and the memory cap.
+
+## License
+
+License: CC0 1.0 (public domain dedication). See [LICENSE](LICENSE).
