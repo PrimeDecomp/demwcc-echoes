@@ -27,6 +27,15 @@ pub fn work_dir(sub: &str) -> PathBuf {
     work_base().join(sub)
 }
 
+/// The project's include directories whose headers a context names (relative to the root, in
+/// the game flags' search order): the game's own, the Dolphin SDK's and rstl's.
+pub const HEADER_DIRS: [&str; 3] = ["include", "extern/sdk/include", "extern/rstl/include"];
+
+/// The file an `#include` of NAME reads: NAME in the first of [`HEADER_DIRS`] that has it.
+pub fn find_header(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    HEADER_DIRS.iter().map(|d| root.join(d).join(name)).find(|p| p.is_file())
+}
+
 /// Fingerprint of the project's headers: path, size and modification time of every file under
 /// the include directories (`include`, `libc`, `extern`, `build/G2ME01/include`) and of the
 /// header files under `src` (FNV-1a 64 of the sorted entries). Caches of results derived from

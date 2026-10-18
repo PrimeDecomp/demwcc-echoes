@@ -1,8 +1,9 @@
 //! Automatic header-only context for units without a source file (`mwdec harvest`).
 //!
-//! The context is a list of `#include` lines of headers under `include/` that define the
-//! classes named by the module's symbols (relocation targets of the unit's code and of the
-//! module's data objects: callees, vtables, globals), plus a few base headers. Only headers are
+//! The context is a list of `#include` lines of headers in the include directories (`include/`,
+//! the SDK's, rstl's) that define the classes named by the module's symbols (relocation targets
+//! of the unit's code and of the module's data objects: callees, vtables, globals), plus a few
+//! base headers. Only headers are
 //! read (to index which header defines which class); never a `.cpp`/`.c` file. Compiler flags
 //! are the project's REL game-unit flags (the most common flag set of REL C++ units).
 //!
@@ -23,7 +24,7 @@ fn base_headers() -> Vec<String> {
     v.split(',').map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect()
 }
 
-/// class/struct name -> headers (relative to include/) that define it; REL flags; caches.
+/// class/struct name -> headers (relative to their include directory) that define it; REL flags; caches.
 pub struct HeaderIndex {
     pub defs: BTreeMap<String, Vec<String>>,
     root: PathBuf,
@@ -83,13 +84,19 @@ fn defined_types(text: &str) -> Vec<String> {
 
 impl HeaderIndex {
     pub fn build(root: &Path) -> HeaderIndex {
-        let inc = root.join("include");
         let mut files = Vec::new();
-        walk(&inc, &inc, &mut files);
-        files.sort();
+        for dir in paths::HEADER_DIRS {
+            let inc = root.join(dir);
+            let mut found = Vec::new();
+            walk(&inc, &inc, &mut found);
+            found.sort();
+            // (a name an earlier directory has is that directory's header)
+            found.retain(|f| !files.iter().any(|(g, _): &(String, PathBuf)| g == f));
+            files.extend(found.into_iter().map(|f| (f.clone(), inc.join(f))));
+        }
         let mut defs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for f in files {
-            let Ok(t) = std::fs::read(inc.join(&f)) else { continue };
+        for (f, path) in files {
+            let Ok(t) = std::fs::read(path) else { continue };
             let t = String::from_utf8_lossy(&t);
             for n in defined_types(&t) {
                 let v = defs.entry(n).or_default();
@@ -187,7 +194,7 @@ pub fn auto_unit(p: &Project, u: &Unit, idx: &HeaderIndex) -> Result<(Unit, Stri
             }
         }
     }
-    let mut headers: Vec<String> = base_headers().into_iter().filter(|h| idx.root.join("include").join(h).exists()).collect();
+    let mut headers: Vec<String> = base_headers().into_iter().filter(|h| paths::find_header(&idx.root, h).is_some()).collect();
     for n in &names {
         if let Some(h) = idx.header_for(n) {
             if !headers.contains(h) {

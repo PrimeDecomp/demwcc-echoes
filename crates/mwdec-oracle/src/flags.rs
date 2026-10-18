@@ -5,9 +5,9 @@ use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
-    /// main.dol game code (762 units): GC/2.7, C++, deferred,noauto, inline_max_size(125).
+    /// main.dol game code (763 units): GC/2.7, C++, deferred,noauto, inline_max_size(128).
     Game,
-    /// REL game code (27 units): Game + `-sdata 0 -sdata2 0 -pool off`.
+    /// REL game code (106 units): Game + `-sdata 0 -sdata2 0 -pool off`.
     Rel,
     /// REL with pooling (3 units): Game + `-sdata 0 -sdata2 0`.
     RelPool,
@@ -79,15 +79,16 @@ fn split(s: &str) -> Vec<String> {
 /// Full flag list (without `-c`, input, `-o`) for a profile. `root` = project root (for include paths).
 pub fn profile_flags(p: Profile, root: &Path) -> Vec<String> {
     let r = root.to_string_lossy().replace('\\', "/");
-    let inc = format!("-i {r}/include -i {r}/libc -i {r}/build/G2ME01/include");
+    let inc = format!("-i {r}/include -i {r}/extern/sdk/include -i {r}/libc -i {r}/build/G2ME01/include");
     let common = "-nodefaults -proc gekko -align powerpc -enum int -fp hardware -Cpp_exceptions off -O4,p \
         -inline auto -pragma \"cats off\" -pragma \"warn_notinlined off\" -maxerrors 1 -nosyspath -RTTI off \
         -fp_contract on -str reuse";
     let defs = "-DBUILD_VERSION=0 -DVERSION=0 -multibyte -DNDEBUG=1";
     let game = format!(
-        "{common} {inc} {defs} -use_lmw_stmw on -str reuse,pool,readonly -gccinc -inline deferred,noauto -common on \
+        "{common} {inc} {defs} -i {r}/extern/rstl/include -DRSTL_VERSION=10 -use_lmw_stmw on \
+         -str reuse,pool,readonly -gccinc -inline deferred,noauto -common on \
          -i {r}/extern/musyx/include -DMUSY_TARGET=MUSY_TARGET_DOLPHIN -DMUSY_VERSION_MAJOR=2 -DMUSY_VERSION_MINOR=0 \
-         -DMUSY_VERSION_PATCH=3 -pragma \"inline_max_size(125)\""
+         -DMUSY_VERSION_PATCH=3 -pragma \"inline_max_size(128)\" -pragma \"inline_max_total_size(10000)\""
     );
     let s = match p {
         Profile::Game => format!("{game} -lang=c++"),
@@ -99,10 +100,11 @@ pub fn profile_flags(p: Profile, root: &Path) -> Vec<String> {
         ),
         Profile::Sdk125 => format!("{common} {inc} {defs} -multibyte -fp_contract off -lang=c"),
         Profile::Musyx => format!(
-            "-proc gekko -nodefaults -nosyspath -i {r}/include -i {r}/libc -i {r}/extern/musyx/include \
+            "-proc gekko -nodefaults -nosyspath -i {r}/include -i {r}/extern/sdk/include -i {r}/libc \
+             -i {r}/extern/musyx/include \
              -inline auto,depth=4 -O4,p -fp hard -enum int -sym on -Cpp_exceptions off -str reuse,pool,readonly \
              -fp_contract off -DMUSY_TARGET=MUSY_TARGET_DOLPHIN -DM_PI=3.14159265358979323846 \
-             -DMUSY_VERSION_MAJOR=2 -DMUSY_VERSION_MINOR=0 -DMUSY_VERSION_PATCH=3 -lang=c"
+             -DMUSY_VERSION_MAJOR=2 -DMUSY_VERSION_MINOR=0 -DMUSY_VERSION_PATCH=2 -lang=c"
         ),
     };
     split(&s)

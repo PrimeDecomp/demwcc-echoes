@@ -3,10 +3,11 @@
 //! The harness context of a unit is the `#include` lines of its source. Symbols of the unit's
 //! target object (function names, relocation targets, data symbols such as vtables) can name
 //! classes none of those headers (nor anything they include) defines; the drafter then has no
-//! layout, member names, vtable or destructor for them. Headers under `include/` that define such
-//! classes (the harvest header index) are appended to the context, as long as the extended
-//! context still compiles (headers the compiler names in errors are dropped). The decision only
-//! reads header texts and symbol names, and is cached on disk per (unit, context, flags).
+//! layout, member names, vtable or destructor for them. Headers in the include directories that
+//! define such classes (the harvest header index) are appended to the context, as long as the
+//! extended context still compiles (headers the compiler names in errors are dropped). The
+//! decision only reads header texts and symbol names, and is cached on disk per (unit, context,
+//! flags).
 
 use super::autoctx::{type_names_of, HeaderIndex};
 use mwdec_core::*;
@@ -18,7 +19,7 @@ use std::sync::OnceLock;
 
 struct Index {
     headers: HeaderIndex,
-    /// header (relative to include/) -> headers it includes (resolved, relative to include/)
+    /// header (relative to its include directory) -> headers it includes (resolved, likewise)
     includes: BTreeMap<String, Vec<String>>,
 }
 
@@ -61,12 +62,15 @@ fn walk(dir: &Path, base: &Path, out: &mut BTreeSet<String>) {
 fn index(root: &Path) -> &'static Index {
     INDEX.get_or_init(|| {
         let headers = HeaderIndex::build(root);
-        let inc = root.join("include");
         let mut files: BTreeSet<String> = BTreeSet::new();
-        walk(&inc, &inc, &mut files);
+        for dir in paths::HEADER_DIRS {
+            let inc = root.join(dir);
+            walk(&inc, &inc, &mut files);
+        }
         let mut includes = BTreeMap::new();
         for f in &files {
-            let Ok(t) = std::fs::read(inc.join(f)) else { continue };
+            let Some(path) = paths::find_header(root, f) else { continue };
+            let Ok(t) = std::fs::read(path) else { continue };
             let dir = Path::new(f).parent().map(|d| d.to_string_lossy().replace('\\', "/")).unwrap_or_default();
             let v: Vec<String> = include_targets(&String::from_utf8_lossy(&t))
                 .into_iter()
@@ -85,7 +89,7 @@ fn index(root: &Path) -> &'static Index {
     })
 }
 
-/// Headers (relative to include/) reachable from the context's include lines.
+/// Headers (relative to their include directory) reachable from the context's include lines.
 fn closure(ix: &Index, context: &str) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
     let mut q: VecDeque<String> = include_targets(context).into();

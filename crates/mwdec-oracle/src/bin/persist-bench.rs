@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     let comp = Compiler::default();
     let mixed = args.iter().any(|a| a == "--mixed");
     if mixed {
-        context.push_str("#include \"Kyoto/Math/CVector3f.hpp\"
+        context.push_str("#include \"Echoes/Kyoto/Math/CVector3f.hpp\"
 ");
     }
     // --mixed: bodies that use header inlines, static locals, strings, switches, float literals,
