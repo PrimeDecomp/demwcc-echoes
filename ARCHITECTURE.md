@@ -283,6 +283,8 @@ exhausting the machine. Elsewhere it is a no-op.
   the parent's cap is lower), so a pathological function becomes an `oom/too-big`, `crash` or
   `timeout` row and the child restarts. Harvest's supervised child likewise restarts after an
   allocation failure.
+- In-process (WebAssembly) compiles allocate their memory in mwdec's own process, under the
+  same cap.
 - Reporting: `memcap::stats` / `report_line` (`eval --mem-report`); every eval row records the
   process commit (`mem_mb`).
 - Operating rules: in-memory caches must be bounded (LRU or per-unit) with big caches on disk;

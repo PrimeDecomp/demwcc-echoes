@@ -12,3 +12,4 @@ ppc750cl.workspace = true
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true
+mwcc-wasm.workspace = true

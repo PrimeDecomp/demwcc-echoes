@@ -4,6 +4,7 @@
 //! - [`asm`]: parse the ELF and print an annotated listing (relocs, literal values, labels).
 //! - [`variants`]: experiment files with variants + machine-checked expectations.
 //! - [`webs`]: recover callee-saved register webs (live ranges, interference) from object code.
+//! - [`wasm`]: the compiler run in process as WebAssembly (GC 2.6 / 2.7), in place of the executable.
 //! - [`regalloc`]: model of MWCC's register colouring (predict / inverse-solve priority orders).
 pub mod advice;
 pub mod asm;
@@ -18,4 +19,5 @@ pub mod sched;
 pub mod schedcheck;
 pub mod tracer;
 pub mod variants;
+pub mod wasm;
 pub mod webs;

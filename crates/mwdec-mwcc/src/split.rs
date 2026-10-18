@@ -48,7 +48,7 @@ impl Mwcc {
     fn split_key(&self, ctx: &UnitContext) -> u128 {
         // Not keyed by flags: the diagnostic `-sym on` variant of a context reuses the base
         // context's split (re-verified on use).
-        content_hash(&[CACHE_SALT.as_bytes(), b"split", self.compiler.as_bytes(), ctx.context.as_bytes()])
+        content_hash(&[CACHE_SALT.as_bytes(), b"split", self.compiler_id().as_bytes(), ctx.context.as_bytes()])
     }
 
     fn split_file(&self, ctx: &UnitContext) -> Option<PathBuf> {

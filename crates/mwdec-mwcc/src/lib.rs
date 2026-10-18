@@ -7,6 +7,8 @@
 //! - [`compare`] / [`compare_detailed`]: the strict comparator.
 //! - Fast path ([`Mwcc::enable_fast`], module `fast`): candidates compiled by persistent compiler
 //!   processes that parse the context once; failures and exact matches are redone normally.
+//! - GC 2.6 / 2.7 compile in process as WebAssembly when mwcc-tools' module is built
+//!   ([`mwdec_oracle::wasm`]); other compilers, and `MWDEC_WASM=0`, run the executable.
 //!
 //! MWCC quirk: path arguments must be absolute Windows paths with backslashes; forward slashes in
 //! `-precompile` / `-prefix` arguments are rejected ("filename is invalid").
@@ -323,17 +325,40 @@ impl Mwcc {
         format!("{stem}_{}_{n}", std::process::id())
     }
 
+    /// The compiler's identity in cache keys: its path, and whether it runs as WebAssembly (the
+    /// precompiled headers of the two are not interchangeable).
+    fn compiler_id(&self) -> String {
+        if mwdec_oracle::wasm::available(&self.root.join(&self.compiler)) {
+            format!("{}+wasm", self.compiler)
+        } else {
+            self.compiler.clone()
+        }
+    }
+
     /// Run the compiler with `args` (cwd = root), bounded by the pool. Returns (status ok, messages, ms).
     fn run(&self, args: &[String], log_stem: &Path) -> Result<(bool, Option<i32>, String, f64), MwccError> {
         let w = Instant::now();
         let _slot = self.pool.acquire();
         mwdec_core::prof::add("mwcc.slot_wait", w.elapsed().as_secs_f64());
+        let exe = self.root.join(&self.compiler);
+        let t = Instant::now();
+        let wasm = {
+            let _p = mwdec_core::prof::span("mwcc.wasm");
+            mwdec_oracle::wasm::run(&exe, args, &self.root, self.timeout)
+        };
+        if let Some(run) = wasm {
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            return match run {
+                Ok(r) if r.timed_out => Err(MwccError::Timeout { seconds: self.timeout.as_secs() }),
+                Ok(r) => Ok((r.exit_code == 0, Some(r.exit_code), r.console, ms)),
+                // (no status: a crash)
+                Err(e) => Ok((false, None, format!("the compiler trapped: {e:#}"), ms)),
+            };
+        }
         let _p = mwdec_core::prof::span("mwcc.process");
         let out_path = log_stem.with_extension("log");
         let out = std::fs::File::create(&out_path).map_err(io("creating compiler log"))?;
         let err = out.try_clone().map_err(io("cloning log handle"))?;
-        let exe = self.root.join(&self.compiler);
-        let t = Instant::now();
         let mut child = Command::new(&exe)
             .args(args)
             .current_dir(&self.root)
@@ -478,7 +503,7 @@ impl Mwcc {
     }
 
     fn precompile_mch(&self, context: &str, cflags: &[String]) -> Result<UnitContext, MwccError> {
-        let hash = content_hash(&[CACHE_SALT.as_bytes(), self.compiler.as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
+        let hash = content_hash(&[CACHE_SALT.as_bytes(), self.compiler_id().as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
         let dir = self.work.join("pch");
         let mch = dir.join(format!("{hash:032x}.mch"));
         let lock = self.pch_locks.lock().unwrap().entry(hash).or_default().clone();
@@ -492,7 +517,7 @@ impl Mwcc {
 
     /// Precompile `context` into a private `.mch` (a unique file the caller owns and deletes).
     pub(crate) fn precompile_private(&self, context: &str, cflags: &[String]) -> Result<UnitContext, MwccError> {
-        let hash = content_hash(&[CACHE_SALT.as_bytes(), self.compiler.as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
+        let hash = content_hash(&[CACHE_SALT.as_bytes(), self.compiler_id().as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
         let mch = self.build_mch(context, cflags, &self.work.join("pch"), "trial")?;
         Ok(UnitContext { cflags: cflags.to_vec(), context: context.to_string(), mch: Some(mch), hash, text: String::new(), excluded: vec![], tu_name: None })
     }
@@ -536,7 +561,7 @@ impl Mwcc {
     /// A context without PCH: the context text is prepended to every candidate (slow path,
     /// and the reference for verifying that PCH does not change codegen).
     pub fn plain_context(&self, context: &str, cflags: &[String]) -> UnitContext {
-        let hash = content_hash(&[CACHE_SALT.as_bytes(), b"plain", self.compiler.as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
+        let hash = content_hash(&[CACHE_SALT.as_bytes(), b"plain", self.compiler_id().as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
         UnitContext { cflags: cflags.to_vec(), context: context.to_string(), mch: None, hash, text: String::new(), excluded: vec![], tu_name: None }
     }
 

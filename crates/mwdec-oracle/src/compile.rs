@@ -1,4 +1,5 @@
-//! Run mwcceppc.exe on a source string and return the object bytes.
+//! Run mwcceppc.exe (in process as WebAssembly when it has a module: [`crate::wasm`]) on a source
+//! string and return the object bytes.
 
 use crate::flags::{profile_flags, Profile};
 use anyhow::{bail, Context, Result};
@@ -8,6 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// How long an in-process compile may run (the executable runs without a limit).
+const WASM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Clone, Debug)]
 pub struct Compiler {
@@ -92,6 +96,18 @@ impl Compiler {
     /// Compile an existing file to `obj`; returns compiler output text.
     pub fn compile_file(&self, src: &Path, obj: &Path) -> Result<String> {
         let exe = self.exe();
+        let mut args = self.flags();
+        args.extend(["-c".into(), src.to_string_lossy().into_owned(), "-o".into(), obj.to_string_lossy().into_owned()]);
+        if let Some(run) = crate::wasm::run(&exe, &args, &self.work, WASM_TIMEOUT) {
+            let run = run.with_context(|| format!("running {}", exe.display()))?;
+            if run.timed_out {
+                bail!("compile timed out after {}s", WASM_TIMEOUT.as_secs());
+            }
+            if run.exit_code != 0 || !obj.exists() {
+                bail!("compile failed (exit code: {}):\n{}", run.exit_code, run.console.trim());
+            }
+            return Ok(run.console);
+        }
         let out = Command::new(&exe)
             .args(self.flags())
             .arg("-c")
