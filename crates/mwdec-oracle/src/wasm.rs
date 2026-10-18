@@ -5,8 +5,10 @@
 //! - [`run`] runs an executable's module when it has one (`None` otherwise: run the executable).
 //! - The modules are found in the mwcc-tools checkout `MWDEC_MWCC_TOOLS`, by default the one this crate was built
 //!   against (next to this checkout). `MWDEC_WASM=0` turns it off.
-//! - Each module is compiled once per process; each run instantiates it afresh (the compiler keeps its state in
-//!   globals) on a thread with room for the compiler's recursion.
+//! - Each module is loaded once per process, from the compiled artifact the first process to load it wrote under
+//!   the work base (`wasm-cache/GC_2_7/`): compiling it takes seconds, and the eval's draft servers restart. Each run
+//!   instantiates it afresh (the compiler keeps its state in globals) on a thread with room for the compiler's
+//!   recursion.
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -78,7 +80,10 @@ fn loaded(exe: &Path) -> Option<Arc<Loaded>> {
 fn load(exe: &Path, module: &Path) -> Result<Loaded> {
     let _p = mwdec_core::prof::span("mwcc.wasm_load");
     let wasm = std::fs::read(module)?;
-    let compiler = mwcc_wasm::Compiler::new(&wasm).map_err(|e| anyhow!("{e:?}"))?;
+    // (a directory per version: writing a module's artifact removes the earlier builds')
+    let version = module.parent().and_then(Path::parent).and_then(Path::file_name).unwrap_or_default();
+    let cache = mwdec_core::paths::work_dir("wasm-cache").join(version);
+    let compiler = mwcc_wasm::Compiler::new_cached(&wasm, &cache).map_err(|e| anyhow!("{e:?}"))?;
     let version_info = version_info(&std::fs::read(exe)?).unwrap_or_default();
     Ok(Loaded { compiler, version_info })
 }
