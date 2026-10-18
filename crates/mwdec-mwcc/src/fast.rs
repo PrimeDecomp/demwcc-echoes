@@ -1,6 +1,7 @@
-//! Fast path for candidate compiles ([`Mwcc::enable_fast`]): persistent compiler processes
-//! (`mwdec_oracle::persist`) that parse a unit context once and then compile each candidate after
-//! it in a few milliseconds.
+//! Fast path for candidate compiles ([`Mwcc::enable_fast`]): persistent compilers
+//! (`mwdec_oracle::persist`: in process as WebAssembly when the compiler has a persistent module,
+//! else debugged compiler processes) that parse a unit context once and then compile each
+//! candidate after it in a few milliseconds.
 //!
 //! - **Workers**: dedicated long-lived threads (started on first use), each owning up to
 //!   [`persist::CACHE_PER_THREAD`] persistent compilers (the debugger API binds a compiler process

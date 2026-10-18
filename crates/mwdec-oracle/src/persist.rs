@@ -1,5 +1,9 @@
 //! Prototype: a persistent real-compiler process for many compiles that share one context.
 //!
+//! [`compile_cached`] uses the in-process WebAssembly equivalent ([`crate::wasm::Persistent`]: the same
+//! idea in the compiler's own sources, with messages, any thread and no hardcoded addresses) when the
+//! compiler has a persistent module; this debugger-based one otherwise.
+//!
 //! The candidate source is laid out as `<context>` + a marker `#define` line + a padded slot. The
 //! compiler runs under a debugger until the preprocessor reaches the marker directive in the main
 //! file (`CPrep_ParseDirective`, GC/2.7 0x436470, with the text position at `[0x5e9f3c]`): the whole
@@ -806,14 +810,55 @@ impl PersistentCompiler {
 struct CacheEntry {
     key: u64,
     /// None: starting failed for this key (do not retry every call)
-    pc: Option<PersistentCompiler>,
+    pc: Option<Instance>,
+}
+
+/// A cached persistent compiler: in process, when the compiler has a persistent module
+/// ([`crate::wasm::Persistent`]), else a debugged compiler process.
+enum Instance {
+    Wasm(crate::wasm::Persistent),
+    Native(PersistentCompiler),
+}
+
+/// How long a candidate of a cached persistent compiler may take.
+const COMPILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Instance {
+    fn start(comp: &Compiler, context: &str, capacity: usize, file_name: Option<&str>) -> Result<Instance> {
+        let ext = if comp.profile.is_c() { "c" } else { "cpp" };
+        match crate::wasm::Persistent::start(&comp.exe(), &comp.flags(), &comp.work, context, capacity, file_name, ext) {
+            Some(p) => p.map(Instance::Wasm),
+            None => PersistentCompiler::start_as(comp, context, capacity, file_name).map(Instance::Native),
+        }
+    }
+
+    fn compile(&mut self, body: &str) -> Result<CompileOutput> {
+        match self {
+            Instance::Native(pc) => pc.compile(body),
+            Instance::Wasm(p) => {
+                let c = p.compile(body, COMPILE_TIMEOUT)?;
+                match c.object {
+                    Some(object) if c.exit_code == 0 => Ok(CompileOutput { object, messages: c.console }),
+                    _ => bail!("{COMPILE_FAILED} (exit status {}): {}", c.exit_code, c.console.trim()),
+                }
+            }
+        }
+    }
+
+    /// Whether it can compile again after a failure.
+    fn usable(&self) -> bool {
+        match self {
+            Instance::Native(pc) => pc.stopped.is_some(),
+            Instance::Wasm(p) => p.alive(),
+        }
+    }
 }
 
 thread_local! {
     static CACHE: std::cell::RefCell<Vec<CacheEntry>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Instances kept per thread (each is one idle compiler process of a few tens of MB).
+/// Instances kept per thread (each is a snapshot and an idle compiler of a few tens of MB).
 pub const CACHE_PER_THREAD: usize = 2;
 const DEFAULT_CAPACITY: usize = 64 * 1024;
 
@@ -829,7 +874,8 @@ fn cache_key(comp: &Compiler, context: &str, file_name: Option<&str>, capacity: 
     h.finish()
 }
 
-/// Compile `context` + `body` through a persistent compiler cached on the calling thread
+/// Compile `context` + `body` through a persistent compiler cached on the calling thread (in
+/// process when the compiler has a persistent module: [`crate::wasm::Persistent`])
 /// (started on first use for this compiler/flags/context/file name, at most
 /// [`CACHE_PER_THREAD`] per thread, least recently used dropped). An error means "use a normal
 /// compile": a context that fails to start is remembered and fails fast afterwards; an instance
@@ -849,7 +895,7 @@ pub fn compile_cached(comp: &Compiler, context: &str, file_name: Option<&str>, b
                 while cache.len() >= CACHE_PER_THREAD {
                     cache.remove(0);
                 }
-                let pc = PersistentCompiler::start_as(comp, context, capacity, file_name).ok();
+                let pc = Instance::start(comp, context, capacity, file_name).ok();
                 cache.push(CacheEntry { key, pc });
                 cache.len() - 1
             }
@@ -860,7 +906,7 @@ pub fn compile_cached(comp: &Compiler, context: &str, file_name: Option<&str>, b
         let last = cache.len() - 1;
         let Some(pc) = cache[last].pc.as_mut() else { bail!("persistent compiler unavailable for this context") };
         let r = pc.compile(body);
-        if r.is_err() && pc.stopped.is_none() {
+        if r.is_err() && !pc.usable() {
             cache.remove(last);
         }
         r

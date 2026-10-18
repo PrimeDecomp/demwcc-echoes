@@ -253,7 +253,7 @@ with it; nothing grows with the number of functions processed.
 | split-PCH repairs (`<hash>.split`) | `mwdec_mwcc::split` | disk, next to the PCH | one per context |
 | compiled candidates (`<hash>.o` / `.err`) | `Mwcc::compile_in` | disk: `<mwcc work>/cache` | off for search drivers (`Compilers::for_unit` sets `disk_cache = None`); on for `check` and probe drivers |
 | compiled candidates | `Mwcc` `MemCache` | memory | byte budget, 96 MB default (`MWDEC_MEMCACHE_MB`), oldest evicted first; per driver |
-| parsed contexts (persistent compiler snapshots) | `Mwcc` fast path | memory + one idle compiler process each | at most workers (<= 4) x 2 per driver, LRU per worker; ended with the driver (harvest: 2 workers per unit driver); `MWDEC_PERSIST=0` turns it off |
+| parsed contexts (persistent compiler snapshots) | `Mwcc` fast path | memory + one idle compiler each (in process with `persist.wasm`: a snapshot of 5-15 MB and its instance; else a process) | at most workers (<= 4) x 2 per driver, LRU per worker; ended with the driver (harvest: 2 workers per unit driver); `MWDEC_PERSIST=0` turns it off |
 | TypeDb per context (`<hash>.json.gz`) | `mwdec_ctx::build_typedb_in` | disk: `<work base>/mwdec-ctx/ctxcache` | one per (context, flags, root) |
 | inline templates and probe failures | `mwdec_inline::ProbeCache` | disk: `<work base>/mwdec-inline/tcache/<generation>` | keyed by probe text + compiler + flags |
 | probe compiles | `Compilers::probe_driver` | disk: `<mwcc work>/inline-probes/<compiler>` | shared across units and runs |

@@ -703,11 +703,12 @@ impl Mwcc {
     }
 
     /// Turn on the fast path for candidate compiles: up to `workers` (at most [`MAX_FAST_WORKERS`]) persistent
-    /// compiler threads (module `fast`), started on first use. GC/2.7 only; contexts compiled
-    /// with line information (`-sym`, `-g`) always compile normally. `MWDEC_PERSIST=0` in the
-    /// environment keeps it off. Returns whether it is on.
+    /// compiler threads (module `fast`), started on first use. GC/2.7, or a compiler with a
+    /// persistent WebAssembly module; contexts compiled with line information (`-sym`, `-g`) always
+    /// compile normally. `MWDEC_PERSIST=0` in the environment keeps it off. Returns whether it is on.
     pub fn enable_fast(&self, workers: usize) -> bool {
-        if fast_disabled_by_env() || !self.compiler.replace('\\', "/").contains("GC/2.7/") {
+        let native = self.compiler.replace('\\', "/").contains("GC/2.7/");
+        if fast_disabled_by_env() || !(native || mwdec_oracle::wasm::persistent_available(&self.root.join(&self.compiler))) {
             return false;
         }
         let mut f = self.fast.write().unwrap();
