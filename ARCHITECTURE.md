@@ -31,9 +31,14 @@ project root with a bounded process pool: `precompile` (per-unit `.mch` precompi
 compiler crashes with some precompiled headers (`repair`, `uses_split`). `compare`,
 `compare_detailed` and `compare_indexed` (with `ObjIndex`, `ExternIndex` for literals defined
 in other objects of the module) implement the comparator and return a `DiffClass`. The `fast`
-module (`enable_fast`, on for the search drivers) serves `compile_in` from persistent compiler
-processes (`mwdec_oracle::persist`) on dedicated worker threads; failures are recompiled
-normally, `Compiled::fast` marks such objects and `compile_in_normal` confirms exact matches.
+module (`enable_fast`, on for the search drivers) serves `compile_in` from persistent compilers.
+For GC 2.6 / 2.7 that is mwcc-wasm's `PersistPool` in process (at most 2 per search worker, up to
+6 workers: 12 snapshots, each dropped after 2 idle minutes), with `compile_in_slow` as its normal
+compile; for other compilers, debugged compiler processes (`mwdec_oracle::persist`) on dedicated
+worker threads. A fast failure with a compiler diagnostic is trusted (one in 8 is still compiled
+normally) and reported with `UNCONFIRMED_FAILURE` before its messages, so draft-time decisions
+(`Scorer.confirm_failures`) confirm it; `Compiled::fast` marks fast objects and
+`compile_in_normal` confirms exact matches.
 
 **`mwdec-ctx`**: type context. `build_typedb(context_tu, cflags, work_dir) -> TypeDb`
 preprocesses the context, scans declarations (`scan`), compiles forcing declarations with `-g`,
@@ -255,7 +260,7 @@ with it; nothing grows with the number of functions processed.
 | split-PCH repairs (`<hash>.split`) | `mwdec_mwcc::split` | disk, next to the PCH | one per context |
 | compiled candidates (`<hash>.o` / `.err`) | `Mwcc::compile_in` | disk: `<mwcc work>/cache` | off for search drivers (`Compilers::for_unit` sets `disk_cache = None`); on for `check` and probe drivers |
 | compiled candidates | `Mwcc` `MemCache` | memory | byte budget, 96 MB default (`MWDEC_MEMCACHE_MB`), oldest evicted first; per driver |
-| parsed contexts (persistent compiler snapshots) | `Mwcc` fast path | memory + one idle compiler each (in process with `persist.wasm`: a snapshot of 5-15 MB and its instance; else a process) | at most workers (<= 4) x 2 per driver, LRU per worker; ended with the driver (harvest: 2 workers per unit driver); `MWDEC_PERSIST=0` turns it off |
+| parsed contexts (persistent compiler snapshots) | `Mwcc` fast path | memory + one idle compiler each (in process with `mwcc.wasm`: a snapshot of 5-30 MB and its instance, about 70 MB together on CStateManager; else a process) | at most workers (<= 6) x 2 per driver, LRU, an idle one dropped after 2 minutes; ended with the driver (harvest: 2 workers per unit driver); `MWDEC_PERSIST=0` turns it off |
 | TypeDb per context (`<hash>.json.gz`) | `mwdec_ctx::build_typedb_in` | disk: `<work base>/mwdec-ctx/ctxcache` | one per (context, flags, root) |
 | inline templates and probe failures | `mwdec_inline::ProbeCache` | disk: `<work base>/mwdec-inline/tcache/<generation>` | keyed by probe text + compiler + flags |
 | probe compiles | `Compilers::probe_driver` | disk: `<mwcc work>/inline-probes/<compiler>` | shared across units and runs |

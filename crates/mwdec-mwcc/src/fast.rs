@@ -1,7 +1,13 @@
-//! Fast path for candidate compiles ([`Mwcc::enable_fast`]): persistent compilers
-//! (`mwdec_oracle::persist`: in process as WebAssembly when the compiler has a persistent module,
-//! else debugged compiler processes) that parse a unit context once and then compile each
-//! candidate after it in a few milliseconds.
+//! Fast path for candidate compiles ([`Mwcc::enable_fast`]): persistent compilers that parse a unit
+//! context once and then compile each candidate after it in a few milliseconds.
+//!
+//! - A compiler with a WebAssembly module (GC 2.6 / 2.7, `mwdec_oracle::wasm`) uses mwcc-wasm's
+//!   `PersistPool` ([`WasmPool`]): routing by context, starts, LRU snapshots and the trust of
+//!   failures are its. A failure with a compiler diagnostic is reported without a normal compile
+//!   (one in 8 is still checked), marked [`crate::UNCONFIRMED_FAILURE`] so that callers which must
+//!   not act on it confirm it.
+//! - Any other compiler uses the [`FastPool`] below: debugged compiler processes
+//!   (`mwdec_oracle::persist`).
 //!
 //! - **Workers**: dedicated long-lived threads (started on first use), each owning up to
 //!   [`persist::CACHE_PER_THREAD`] persistent compilers (the debugger API binds a compiler process
@@ -39,6 +45,7 @@ const TRUST_AFTER: usize = 4;
 const RECHECK_EVERY: usize = 8;
 
 /// What a persistent compiler is started on: compiler + flags + context text + file name.
+#[derive(Clone)]
 pub(crate) struct Spec {
     pub key: u64,
     pub comp: Compiler,
@@ -550,4 +557,102 @@ fn worker(id: usize, rx: Receiver<Msg>, shared: Arc<Shared>) {
         }
     }
     persist::clear_cache();
+}
+
+/// The fast path of a compiler with a WebAssembly module: mwcc-wasm's persistent pool, and the
+/// contexts it has been given.
+pub(crate) struct WasmPool {
+    pub pool: mwcc_wasm::PersistPool,
+    contexts: Mutex<HashMap<u64, Arc<mwcc_wasm::pool::Context>>>,
+    confirms: AtomicU64,
+    confirm_mismatches: AtomicU64,
+    verified: AtomicU64,
+    verify_mismatches: AtomicU64,
+}
+
+impl WasmPool {
+    /// For `workers` search workers: as many persistent compilers as the debugger pool kept
+    /// (`CACHE_PER_THREAD` per worker).
+    pub fn new(workers: usize) -> WasmPool {
+        WasmPool {
+            pool: mwcc_wasm::PersistPool::new(mwcc_wasm::PoolOptions {
+                max_live: workers.max(1) * persist::CACHE_PER_THREAD,
+                ..mwcc_wasm::PoolOptions::default()
+            }),
+            contexts: Mutex::new(HashMap::new()),
+            confirms: AtomicU64::new(0),
+            confirm_mismatches: AtomicU64::new(0),
+            verified: AtomicU64::new(0),
+            verify_mismatches: AtomicU64::new(0),
+        }
+    }
+
+    /// The pool's context for `spec` (built once; bounded).
+    pub fn context(&self, spec: &Spec, loaded: Arc<mwcc_wasm::Loaded>) -> std::io::Result<Arc<mwcc_wasm::pool::Context>> {
+        let mut contexts = self.contexts.lock().unwrap();
+        if let Some(c) = contexts.get(&spec.key) {
+            return Ok(c.clone());
+        }
+        if contexts.len() >= 64 {
+            contexts.clear();
+        }
+        // (the source is only in the overlay; its directory is the compiler's)
+        let directory = std::path::absolute(&spec.comp.work)?;
+        std::fs::create_dir_all(&directory)?;
+        let ext = if spec.comp.profile.is_c() { "c" } else { "cpp" };
+        let source = directory.join("wp").join(spec.file_name.clone().unwrap_or_else(|| format!("context.{ext}")));
+        let output = directory.join("wp.o").to_string_lossy().into_owned();
+        let mut args = spec.comp.flags();
+        args.extend(["-c".into(), source.to_string_lossy().into_owned(), "-o".into(), output.clone()]);
+        let exe = spec.comp.exe();
+        let context = Arc::new(mwcc_wasm::pool::Context {
+            module: loaded,
+            args,
+            output,
+            directory,
+            environment: std::env::vars().collect(),
+            program: std::path::absolute(&exe).unwrap_or(exe).to_string_lossy().into_owned(),
+            source,
+            text: spec.context.clone(),
+            overlay: mwcc_wasm::Overlay::new(),
+            transcode_sjis: false,
+        });
+        contexts.insert(spec.key, context.clone());
+        Ok(context)
+    }
+
+    pub fn note_confirm(&self, agreed: bool) {
+        self.confirms.fetch_add(1, Relaxed);
+        if !agreed {
+            self.confirm_mismatches.fetch_add(1, Relaxed);
+        }
+    }
+    pub fn note_verify(&self, agreed: bool) {
+        self.verified.fetch_add(1, Relaxed);
+        if !agreed {
+            self.verify_mismatches.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// The pool's counters as the fast path's.
+    pub fn stats(&self) -> FastStats {
+        let p = self.pool.stats();
+        FastStats {
+            compiles: p.fast - p.trusted_failures,
+            failed: p.trusted_failures + p.rechecked,
+            failed_normal_ok: p.mismatches,
+            failed_recompiled: p.rechecked,
+            not_ready: p.not_ready,
+            starts: p.starts,
+            start_failures: p.start_failures,
+            compile_ms: p.fast_ms,
+            start_ms: p.start_ms,
+            confirms: self.confirms.load(Relaxed),
+            confirm_mismatches: self.confirm_mismatches.load(Relaxed),
+            verified: self.verified.load(Relaxed),
+            verify_mismatches: self.verify_mismatches.load(Relaxed),
+            live: p.live,
+            live_max: p.live_max,
+        }
+    }
 }
