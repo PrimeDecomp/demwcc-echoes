@@ -37,7 +37,10 @@ workers: 12 snapshots, each dropped after 2 idle minutes), with `compile_in_slow
 compile. Other compilers compile normally. A fast failure with a compiler diagnostic is trusted (one in 8 is still compiled
 normally) and reported with `UNCONFIRMED_FAILURE` before its messages, so draft-time decisions
 (`Scorer.confirm_failures`) confirm it; `Compiled::fast` marks fast objects and
-`compile_in_normal` confirms exact matches.
+`compile_in_normal` confirms exact matches. `cancellable(flag, f)` stops the in-process compiles
+`f` makes on its thread once `flag` is set (`MwccError::Cancelled`, never cached); the search's
+workers run their evaluations under its stop flag, so its budget or an exact match ends the
+compiles in flight. `compile_in_normal` is never cancelled.
 
 **`mwdec-ctx`**: type context. `build_typedb(context_tu, cflags, work_dir) -> TypeDb`
 preprocesses the context, scans declarations (`scan`), compiles forcing declarations with `-g`,

@@ -472,6 +472,8 @@ pub enum Eval {
     /// Compiled, but the symbol is not defined (name/signature mismatch).
     Missing(Vec<String>),
     Io(String),
+    /// Stopped by the search's cancel flag (its budget, or an exact match): no verdict.
+    Cancelled,
 }
 
 impl Eval {
@@ -591,6 +593,7 @@ impl Scorer<'_> {
             Eval::CompileError(m) => format!("compile error: {}", m.chars().take(100).collect::<String>()),
             Eval::Missing(_) => "missing".into(),
             Eval::Io(m) => format!("io: {}", m.chars().take(100).collect::<String>()),
+            Eval::Cancelled => "cancelled".into(),
         };
         let h = mwdec_mwcc::content_hash(&[src.as_bytes()]) as u32;
         eprintln!("trace-eval {} {what} src#{h:08x} pch_broken={} -> {v}", self.symbol, self.pch_broken.load(std::sync::atomic::Ordering::Relaxed));
@@ -628,6 +631,7 @@ impl Scorer<'_> {
             Ok(c) => c,
             Err(e) if is_crash(&e) => return (Eval::CompileError(crash_text(&e)), true),
             Err(e @ MwccError::Compile { .. }) => return (Eval::CompileError(first_error(e.messages())), true),
+            Err(MwccError::Cancelled) => return (Eval::Cancelled, false),
             Err(e) => return (Eval::Io(e.to_string()), true),
         };
         let ran = !c.cache_hit;

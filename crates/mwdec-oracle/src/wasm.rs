@@ -15,6 +15,7 @@
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -25,6 +26,8 @@ pub struct Run {
     /// stdout and stderr, in the order written.
     pub console: String,
     pub timed_out: bool,
+    /// Stopped by its `cancel` flag.
+    pub cancelled: bool,
 }
 
 /// A module ready to run, with the version information of the executable it stands for.
@@ -86,13 +89,22 @@ pub fn loaded(exe: &Path) -> Result<Option<Arc<Loaded>>> {
     bail!("{error}")
 }
 
-/// Run the module `loaded` of the compiler `exe` with `args` in `directory`. Err: the compiler trapped (a crash).
-pub fn run(loaded: &Loaded, exe: &Path, args: &[String], directory: &Path, timeout: Duration) -> Result<Run> {
+/// Run the module `loaded` of the compiler `exe` with `args` in `directory`, stopped once `cancel` is set. Err: the
+/// compiler trapped (a crash).
+pub fn run(
+    loaded: &Loaded,
+    exe: &Path,
+    args: &[String],
+    directory: &Path,
+    timeout: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Run> {
     let environment: Vec<(String, String)> = std::env::vars().collect();
-    execute(loaded, exe, args, directory, timeout, &environment, false).map(|o| Run {
+    execute(loaded, exe, args, directory, timeout, &environment, false, cancel).map(|o| Run {
         exit_code: o.exit_code,
         console: o.console.iter().map(|b| char::from(*b)).collect(),
-        timed_out: o.timed_out || o.cancelled,
+        timed_out: o.timed_out,
+        cancelled: o.cancelled,
     })
 }
 
@@ -122,7 +134,7 @@ pub fn run_oracle(exe: &Path, args: &[String], directory: &Path, timeout: Durati
     }
     let mut environment: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !k.starts_with("MWCC_ORACLE_")).collect();
     environment.extend(traces.iter().map(|(k, v)| (k.to_string(), v.clone())));
-    execute(&loaded, exe, args, directory, timeout, &environment, true).map(|o| Traced {
+    execute(&loaded, exe, args, directory, timeout, &environment, true, None).map(|o| Traced {
         exit_code: o.exit_code,
         messages: o.stdout.iter().map(|b| char::from(*b)).collect(),
         trace: String::from_utf8_lossy(&o.trace).into_owned(),
@@ -138,6 +150,7 @@ fn execute(
     timeout: Duration,
     environment: &[(String, String)],
     trace: bool,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<mwcc_wasm::Outcome> {
     let program = std::path::absolute(exe).unwrap_or_else(|_| exe.to_path_buf()).to_string_lossy().into_owned();
     let directory = std::path::absolute(directory).unwrap_or_else(|_| directory.to_path_buf());
@@ -151,13 +164,14 @@ fn execute(
                 program: &program,
                 version_info: &[],
                 timeout: Some(timeout),
+                // (the registry's run polls the closure below instead)
                 cancel: None,
                 trace,
                 overlay: None,
                 transcode_sjis: false,
                 record_reads: false,
             },
-            &|| false,
+            &|| cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)),
         )
         .map_err(|e| anyhow!("{e:?}"))
 }

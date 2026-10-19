@@ -100,7 +100,7 @@ impl Compiler {
         args.extend(["-c".into(), src.to_string_lossy().into_owned(), "-o".into(), obj.to_string_lossy().into_owned()]);
         // (GC 2.6 / 2.7 run as their module; the others as processes)
         if let Some(loaded) = crate::wasm::loaded(&exe)? {
-            let run = crate::wasm::run(&loaded, &exe, &args, &self.work, WASM_TIMEOUT).with_context(|| format!("running {}", exe.display()))?;
+            let run = crate::wasm::run(&loaded, &exe, &args, &self.work, WASM_TIMEOUT, None).with_context(|| format!("running {}", exe.display()))?;
             if run.timed_out {
                 bail!("compile timed out after {}s", WASM_TIMEOUT.as_secs());
             }

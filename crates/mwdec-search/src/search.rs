@@ -600,6 +600,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
         Eval::CompileError(m) => initial_error = Some(format!("compile error: {m}")),
         Eval::Missing(fs) => initial_error = Some(format!("symbol not defined; candidate defines {fs:?}")),
         Eval::Io(m) => initial_error = Some(format!("io: {m}")),
+        Eval::Cancelled => initial_error = Some("cancelled".into()),
     }
     let initial = e0.fitness().cloned();
     let exact0 = initial.as_ref().is_some_and(|f| f.exact);
@@ -629,7 +630,8 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
     let init_diag_done = AtomicBool::new(!init_diag.load(Ordering::Relaxed));
     st.traced.insert(text_hash(init));
     let state = Mutex::new(st);
-    let stop = AtomicBool::new(exact0 || initial.is_none());
+    // (also the cancel flag of the workers' compiles: the budget or an exact match ends them)
+    let stop = Arc::new(AtomicBool::new(exact0 || initial.is_none()));
     let symbol = scorer.symbol.clone();
     let locator = &locator;
 
@@ -811,8 +813,11 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                     }
                     let t_eval = Instant::now();
                     PROF_GEN.fetch_add((t_eval - t_gen).as_micros() as u64, Ordering::Relaxed);
-                    let (ev, ran) = scorer.eval(&src);
+                    let (ev, ran) = mwdec_mwcc::cancellable(stop, || scorer.eval(&src));
                     PROF_EVAL.fetch_add(t_eval.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    if matches!(ev, Eval::Cancelled) {
+                        break;
+                    }
                     let mut g = state.lock().unwrap();
                     g.evals += 1;
                     g.compiles += ran as u64;

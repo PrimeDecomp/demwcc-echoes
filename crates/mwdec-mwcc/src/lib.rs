@@ -55,6 +55,8 @@ pub enum MwccError {
     Crash { status: Option<i32>, messages: String },
     /// The compiler did not finish in time (it was killed by PID).
     Timeout { seconds: u64 },
+    /// Stopped by the calling thread's cancel flag ([`cancellable`]). Never cached.
+    Cancelled,
     /// Spawning / file I/O failure.
     Io(String),
 }
@@ -70,6 +72,7 @@ impl std::fmt::Display for MwccError {
 {}", messages.trim_end())
             }
             MwccError::Timeout { seconds } => write!(f, "mwcc timed out after {seconds}s"),
+            MwccError::Cancelled => write!(f, "mwcc cancelled"),
             MwccError::Io(s) => write!(f, "mwcc I/O error: {s}"),
         }
     }
@@ -97,6 +100,26 @@ fn failure(status: Option<i32>, messages: String) -> MwccError {
     } else {
         MwccError::Compile { status, messages }
     }
+}
+
+thread_local! {
+    static CANCEL: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with the compiles it makes on this thread stopped once `cancel` is set (e.g. a search's
+/// budget or its exact match): they end with [`MwccError::Cancelled`]. In-process compiles only
+/// (a process, for compilers without a module, runs to its end; a persistent compile takes a few
+/// milliseconds), and never [`Mwcc::compile_in_normal`]'s, which confirm results.
+pub fn cancellable<T>(cancel: &Arc<std::sync::atomic::AtomicBool>, f: impl FnOnce() -> T) -> T {
+    let previous = CANCEL.with(|c| c.replace(Some(cancel.clone())));
+    let r = f();
+    CANCEL.with(|c| *c.borrow_mut() = previous);
+    r
+}
+
+/// This thread's cancel flag ([`cancellable`]).
+fn cancel_flag() -> Option<Arc<std::sync::atomic::AtomicBool>> {
+    CANCEL.with(|c| c.borrow().clone())
 }
 
 fn io<E: std::fmt::Display>(ctx: &str) -> impl FnOnce(E) -> MwccError + '_ {
@@ -351,10 +374,11 @@ impl Mwcc {
         if let Some(loaded) = loaded {
             let run = {
                 let _p = mwdec_core::prof::span("mwcc.wasm");
-                mwdec_oracle::wasm::run(&loaded, &exe, args, &self.root, self.timeout)
+                mwdec_oracle::wasm::run(&loaded, &exe, args, &self.root, self.timeout, cancel_flag())
             };
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             return match run {
+                Ok(r) if r.cancelled => Err(MwccError::Cancelled),
                 Ok(r) if r.timed_out => Err(MwccError::Timeout { seconds: self.timeout.as_secs() }),
                 Ok(r) => Ok((r.exit_code == 0, Some(r.exit_code), r.console, ms)),
                 // (no status: a crash)
@@ -579,9 +603,13 @@ impl Mwcc {
     }
 
     /// [`Mwcc::compile_in`] without the fast path: a normal compiler run (or a cached result of
-    /// one). Use it to confirm a match found with a fast-path object.
+    /// one), never cancelled ([`cancellable`]). Use it to confirm a match found with a fast-path
+    /// object.
     pub fn compile_in_normal(&self, ctx: &UnitContext, code: &str) -> Result<Compiled, MwccError> {
-        self.compile_in_mode(ctx, code, false)
+        let previous = CANCEL.with(|c| c.take());
+        let r = self.compile_in_mode(ctx, code, false);
+        CANCEL.with(|c| *c.borrow_mut() = previous);
+        r
     }
 
     fn compile_in_mode(&self, ctx: &UnitContext, code: &str, allow_fast: bool) -> Result<Compiled, MwccError> {
