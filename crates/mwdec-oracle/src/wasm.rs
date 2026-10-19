@@ -194,6 +194,8 @@ fn execute(
                     timeout: Some(timeout),
                     cancel: None,
                     trace,
+                    overlay: None,
+                    transcode_sjis: false,
                 })
             })
             .map_err(|e| anyhow!("starting the compiler's thread: {e}"))?
@@ -253,6 +255,8 @@ impl Persistent {
                         timeout: Some(START_TIMEOUT),
                         cancel: None,
                         trace: false,
+                        overlay: None,
+                        transcode_sjis: false,
                     },
                     capacity,
                 )
