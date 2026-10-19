@@ -2,7 +2,18 @@
 //! compiled against some units' precompiled header.
 //!
 //! The crash depends on a few context headers being *in* the PCH (e.g. a call to an out-of-line
-//! member of another class crashes once a particular header is precompiled). Without a fix, every
+//! member of another class crashes once a particular header is precompiled).
+//!
+//! One trigger is known (2026-10-19): a function declared under `#pragma section` in the PCH (Echoes'
+//! `libc/string.h` declares `memset` and `memcpy` under `#pragma section code_type ".init"`) and
+//! used by the candidate. `PPC_EABI_SetSection` looks up the pseudo-section record the declaration
+//! was made under, which a PCH does not keep. The original compiler faults there (`c0000005` at
+//! `004b43a7`, in `PPC_EABI_SetSection`); mwcc-tools' module stops with an internal compiler error
+//! (`ObjGen_PPC_EABI.c` line 2384). So the repair is needed with either. Minimal case: a PCH of
+//! `#pragma section code_type ".init"` / `void* memset(void*, int, unsigned long);` /
+//! `#pragma section code_type`, and a TU `void f(char* p) { memset(p, 0, 4); }` with `-lang=c`.
+//!
+//! Without a fix, every
 //! candidate of such a unit falls back to the plain context (the whole header set parsed as text,
 //! 1.5-2 s per compile instead of ~60 ms), which starves the search.
 //!
