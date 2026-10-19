@@ -244,7 +244,7 @@ fn diagnose(cand: &Candidate, details: Vec<OrderAdvice>) -> OrderDiagnosis {
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
 pub struct PeepholeFired {
-    /// rule name (`oracle_trace`'s names), e.g. `make_record_form`
+    /// rule name (mwcc-trace's names), e.g. `make_record_form`
     pub rule: String,
     /// the instruction the rule matched (compiler PCode text)
     pub before: String,

@@ -717,6 +717,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
+name = "mwcc-trace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mwcc-wasm"
 version = "0.1.0"
 dependencies = [
@@ -838,6 +849,7 @@ name = "mwdec-oracle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mwcc-trace",
  "mwcc-wasm",
  "mwdec-core",
  "object 0.36.7",

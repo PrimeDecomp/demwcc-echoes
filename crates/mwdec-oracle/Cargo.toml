@@ -13,3 +13,4 @@ regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 mwcc-wasm.workspace = true
+mwcc-trace.workspace = true

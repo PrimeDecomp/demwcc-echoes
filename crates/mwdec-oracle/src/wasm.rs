@@ -120,9 +120,9 @@ pub struct Traced {
 
 /// Run the module of `exe` tracing, with the traces `traces` on (`MWCC_ORACLE_*` variables and their values). The
 /// module keeps the records in memory (`mwcc_wasm::Outcome::trace`). Err: `exe` has no module (only GC 2.6 and 2.7
-/// trace), the module is missing or older than the records the tracer reads ([`crate::oracle_trace`]: the last of
-/// them is the peephole's, whose format is in the module's data), or the compiler trapped.
-pub fn run_oracle(exe: &Path, args: &[String], directory: &Path, timeout: Duration, traces: &[(&str, String)]) -> Result<Traced> {
+/// trace), the module is missing or older than the records the tracer reads (the last of them is the peephole's,
+/// whose format is in the module's data), or the compiler trapped.
+pub fn run_oracle(exe: &Path, args: &[String], directory: &Path, timeout: Duration, traces: &[(String, String)]) -> Result<Traced> {
     static TRACES: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
     let Some(loaded) = loaded(exe)? else { bail!("tracer: {} has no module (only GC 2.6 and 2.7 trace)", exe.display()) };
     let module = module_for(exe).expect("a module");
@@ -133,7 +133,7 @@ pub fn run_oracle(exe: &Path, args: &[String], directory: &Path, timeout: Durati
         bail!("tracer: the module {} predates the peephole records: {}", module.display(), build_hint(exe));
     }
     let mut environment: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !k.starts_with("MWCC_ORACLE_")).collect();
-    environment.extend(traces.iter().map(|(k, v)| (k.to_string(), v.clone())));
+    environment.extend(traces.iter().cloned());
     execute(&loaded, exe, args, directory, timeout, &environment, true, None).map(|o| Traced {
         exit_code: o.exit_code,
         messages: o.stdout.iter().map(|b| char::from(*b)).collect(),

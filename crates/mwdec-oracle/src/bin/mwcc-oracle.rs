@@ -415,7 +415,7 @@ fn main() -> Result<()> {
                     print!("{}", t.iro);
                     return Ok(());
                 }
-                for st in t.iro_stages() {
+                for st in mwdec_oracle::iro::parse(&t.iro) {
                     if !want(&st.function) || (!a.all && st.stage != mwdec_oracle::iro::FINAL_STAGE) {
                         continue;
                     }

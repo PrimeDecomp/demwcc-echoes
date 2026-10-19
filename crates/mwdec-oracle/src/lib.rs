@@ -13,9 +13,9 @@ pub mod explain;
 pub mod flags;
 pub mod hints;
 pub mod iro;
-pub mod oracle_trace;
 pub mod regalloc;
-pub mod sched;
+/// The list scheduler, observed (mwcc-trace's model).
+pub use mwcc_trace::sched;
 pub mod schedcheck;
 pub mod tracer;
 pub mod variants;
