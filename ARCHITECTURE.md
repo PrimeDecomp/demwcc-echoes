@@ -292,7 +292,10 @@ exhausting the machine. Elsewhere it is a no-op.
   `timeout` row and the child restarts. Harvest's supervised child likewise restarts after an
   allocation failure.
 - In-process (WebAssembly) compiles allocate their memory in mwdec's own process, under the
-  same cap.
+  same cap. mwcc-wasm also limits each run to 1 GiB (`MWCC_WASM_MEMORY_MB`): past it, the run
+  stops with "out of memory" (a crash to `MwccError`). The fast path's 12 snapshots and their
+  instances take about 70 MB each on CStateManager. The job's limit counts the process
+  compiles (the SDK's GC 1.x) too.
 - Reporting: `memcap::stats` / `report_line` (`eval --mem-report`); every eval row records the
   process commit (`mem_mb`).
 - Operating rules: in-memory caches must be bounded (LRU or per-unit) with big caches on disk;

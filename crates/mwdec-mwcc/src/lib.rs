@@ -109,9 +109,19 @@ thread_local! {
 /// Run `f` with the compiles it makes on this thread stopped once `cancel` is set (e.g. a search's
 /// budget or its exact match): they end with [`MwccError::Cancelled`]. In-process compiles only
 /// (a process, for compilers without a module, runs to its end; a persistent compile takes a few
-/// milliseconds), and never [`Mwcc::compile_in_normal`]'s, which confirm results.
+/// milliseconds), and never [`Mwcc::compile_in_normal`]'s, which confirm results, nor the PCH
+/// builds and the search for a split PCH, whose results are kept.
 pub fn cancellable<T>(cancel: &Arc<std::sync::atomic::AtomicBool>, f: impl FnOnce() -> T) -> T {
     let previous = CANCEL.with(|c| c.replace(Some(cancel.clone())));
+    let r = f();
+    CANCEL.with(|c| *c.borrow_mut() = previous);
+    r
+}
+
+/// Run `f` with this thread's compiles not cancelled ([`cancellable`]): for work whose result is
+/// kept (a split PCH found, a PCH built) or confirms one.
+pub(crate) fn uncancelled<T>(f: impl FnOnce() -> T) -> T {
+    let previous = CANCEL.with(|c| c.take());
     let r = f();
     CANCEL.with(|c| *c.borrow_mut() = previous);
     r
@@ -567,7 +577,7 @@ impl Mwcc {
             std::fs::write(&src, context).map_err(io("writing context"))?;
             let mut args: Vec<String> = cflags.to_vec();
             args.extend(["-c".into(), win_path(&src), "-o".into(), win_path(dir), "-precompile".into(), win_path(&tmp_mch)]);
-            let res = self.run(&args, &stem);
+            let res = uncancelled(|| self.run(&args, &stem));
             let _ = std::fs::remove_file(&src);
             let (ok, status, messages, _ms) = res?;
             if ok && tmp_mch.exists() {
@@ -606,10 +616,7 @@ impl Mwcc {
     /// one), never cancelled ([`cancellable`]). Use it to confirm a match found with a fast-path
     /// object.
     pub fn compile_in_normal(&self, ctx: &UnitContext, code: &str) -> Result<Compiled, MwccError> {
-        let previous = CANCEL.with(|c| c.take());
-        let r = self.compile_in_mode(ctx, code, false);
-        CANCEL.with(|c| *c.borrow_mut() = previous);
-        r
+        uncancelled(|| self.compile_in_mode(ctx, code, false))
     }
 
     fn compile_in_mode(&self, ctx: &UnitContext, code: &str, allow_fast: bool) -> Result<Compiled, MwccError> {

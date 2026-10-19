@@ -142,7 +142,8 @@ impl Mwcc {
             return None;
         }
         let cell = self.splits.lock().unwrap().entry(ctx.hash).or_default().clone();
-        let mut s = cell.get_or_init(|| self.find_split(ctx, code)).clone()?;
+        // (not cancelled: its result is kept, here and on disk)
+        let mut s = cell.get_or_init(|| uncancelled(|| self.find_split(ctx, code))).clone()?;
         s.tu_name = ctx.tu_name.clone();
         Some(s)
     }
