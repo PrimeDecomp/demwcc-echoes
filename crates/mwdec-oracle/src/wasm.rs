@@ -114,7 +114,7 @@ pub fn run(exe: &Path, args: &[String], directory: &Path, timeout: Duration) -> 
     }
     let loaded = loaded(exe)?;
     let environment: Vec<(String, String)> = std::env::vars().collect();
-    Some(execute(&loaded, exe, args, directory, timeout, &environment).map(|o| Run {
+    Some(execute(&loaded, exe, args, directory, timeout, &environment, false).map(|o| Run {
         exit_code: o.exit_code,
         console: o.console.iter().map(|b| char::from(*b)).collect(),
         timed_out: o.timed_out || o.cancelled,
@@ -146,8 +146,7 @@ pub fn oracle_available(exe: &Path) -> bool {
 }
 
 /// Run the oracle module of `exe` with the traces `traces` on (`MWCC_ORACLE_*` variables and their values); `None`:
-/// it has none. The records go to the compiler's stderr, which stays in memory: a trace file would be written a
-/// fragment of a record at a time.
+/// it has none. The module keeps the records in memory (`mwcc_wasm::Outcome::trace`).
 pub fn run_oracle(
     exe: &Path,
     args: &[String],
@@ -162,10 +161,10 @@ pub fn run_oracle(
     let mut environment: Vec<(String, String)> =
         std::env::vars().filter(|(k, _)| !k.starts_with("MWCC_ORACLE_")).collect();
     environment.extend(traces.iter().map(|(k, v)| (k.to_string(), v.clone())));
-    Some(execute(&loaded, exe, args, directory, timeout, &environment).map(|o| Traced {
+    Some(execute(&loaded, exe, args, directory, timeout, &environment, true).map(|o| Traced {
         exit_code: o.exit_code,
         messages: o.stdout.iter().map(|b| char::from(*b)).collect(),
-        trace: String::from_utf8_lossy(&o.stderr).into_owned(),
+        trace: String::from_utf8_lossy(&o.trace).into_owned(),
         timed_out: o.timed_out || o.cancelled,
     }))
 }
@@ -177,6 +176,7 @@ fn execute(
     directory: &Path,
     timeout: Duration,
     environment: &[(String, String)],
+    trace: bool,
 ) -> Result<mwcc_wasm::Outcome> {
     let program = std::path::absolute(exe).unwrap_or_else(|_| exe.to_path_buf()).to_string_lossy().into_owned();
     let directory = std::path::absolute(directory).unwrap_or_else(|_| directory.to_path_buf());
@@ -193,6 +193,7 @@ fn execute(
                     version_info: &loaded.version_info,
                     timeout: Some(timeout),
                     cancel: None,
+                    trace,
                 })
             })
             .map_err(|e| anyhow!("starting the compiler's thread: {e}"))?
@@ -251,6 +252,7 @@ impl Persistent {
                         version_info: &loaded.version_info,
                         timeout: Some(START_TIMEOUT),
                         cancel: None,
+                        trace: false,
                     },
                     capacity,
                 )
