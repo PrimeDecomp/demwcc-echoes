@@ -27,6 +27,7 @@ clap = { version = "4", features = ["derive"] }
 # The compiler as WebAssembly (mwcc-tools, checked out next to this repository)
 mwcc-wasm = { path = "../mwcc/crates/mwcc-wasm" }
 mwcc-trace = { path = "../mwcc/crates/mwcc-trace" }
+mwcc-compare = { path = "../mwcc/crates/mwcc-compare" }
 
 [profile.release]
 debug = 1

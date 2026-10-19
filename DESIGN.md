@@ -64,11 +64,13 @@ For the function symbol in our compiled object vs the target object:
   equal only when **proven by bytes**: our function is compiled in the same context (from the
   sources that make the compiler emit it, `mwdec_emit::instantiate`) and compares exact with the
   placeholder's code under these same rules, recursively up to depth 2 (nested placeholders need
-  their own proof), results cached per unit. Without the proof the relocation differs. Module
-  `mwdec_mwcc::placeholder` (the proof) and `mwdec::placeholders` (the compiles);
-  `MWDEC_NO_PLACEHOLDER=1` turns it off.
+  their own proof), results cached per unit. Without the proof the relocation differs. The proof
+  is mwcc-compare's (`mwcc_compare::strict::PlaceholderProver`), the compiles
+  `mwdec::placeholders`; `MWDEC_NO_PLACEHOLDER=1` turns the compiled proofs off (a placeholder
+  is then proven only against a function our own object defines).
 
 This is stricter than objdiff (which ignores literal values and reloc targets). Implementation:
+mwcc-compare's strict level (`mwcc_compare::strict`, a port of mwdec's), called through
 `mwdec_mwcc::compare` / `compare_indexed`, which also classify a mismatch (`DiffClass`: size,
 code, reloc-layout, target-name, unresolved, literal). Literals the target only references (dtk
 put them in another split) are resolved through an `ExternIndex` of the module's other target

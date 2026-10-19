@@ -364,18 +364,173 @@ impl ObjCache {
     /// `Some(None)`: compiled, but the probe function wasn't in the object.
     pub fn get(&self, probe_text: &str) -> Option<Option<mwdec_core::ObjectFile>> {
         let s = std::fs::read_to_string(self.path(probe_text)).ok()?;
-        let (text, o): (String, Option<mwdec_core::ObjectFile>) = serde_json::from_str(&s).ok()?;
-        (text == probe_text).then_some(o)
+        let (text, o): (String, Option<StoredObject>) = serde_json::from_str(&s).ok()?;
+        (text == probe_text).then(|| o.map(StoredObject::into_object))
     }
 
     pub fn put(&self, probe_text: &str, o: &Option<mwdec_core::ObjectFile>) {
         let p = self.path(probe_text);
         let _ = std::fs::create_dir_all(p.parent().unwrap());
-        if let Ok(s) = serde_json::to_string(&(probe_text, o)) {
+        if let Ok(s) = serde_json::to_string(&(probe_text, o.as_ref().map(StoredObject::of))) {
             let tmp = p.with_extension(format!("tmp{}", std::process::id()));
             if std::fs::write(&tmp, s).is_ok() {
                 let _ = std::fs::rename(&tmp, &p);
             }
+        }
+    }
+}
+
+/// An object as [`ObjCache`] stores it: mwdec-core's former object types, field for field (the
+/// objects are mwcc-compare's now, without serde), so entries written before still read.
+#[derive(Serialize, Deserialize)]
+struct StoredObject {
+    #[serde(default)]
+    path: String,
+    functions: Vec<StoredFunction>,
+    data: std::collections::BTreeMap<String, StoredData>,
+    all_symbols: Vec<String>,
+    #[serde(default)]
+    sections: Vec<StoredSection>,
+    #[serde(default)]
+    symbols: Vec<StoredSymbol>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+enum StoredKind {
+    Addr32,
+    Addr16Lo,
+    Addr16Hi,
+    Addr16Ha,
+    Rel24,
+    Rel14,
+    EmbSda21,
+    Other(u32),
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+enum StoredBinding {
+    Global,
+    Local,
+    Weak,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredReloc {
+    offset: u32,
+    kind: StoredKind,
+    target: String,
+    addend: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredFunction {
+    name: String,
+    binding: StoredBinding,
+    address: u32,
+    code: Vec<u8>,
+    relocs: Vec<StoredReloc>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredData {
+    name: String,
+    binding: StoredBinding,
+    section: String,
+    size: u32,
+    bytes: Vec<u8>,
+    relocs: Vec<StoredReloc>,
+    #[serde(default)]
+    address: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredSection {
+    name: String,
+    size: u32,
+    bytes: Vec<u8>,
+    executable: bool,
+    relocs: Vec<StoredReloc>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredSymbol {
+    name: String,
+    section: String,
+    address: u32,
+    size: u32,
+    binding: StoredBinding,
+    is_func: bool,
+}
+
+impl StoredObject {
+    fn of(o: &mwdec_core::ObjectFile) -> StoredObject {
+        use mwdec_core::{RelocKind as K, SymBinding as B};
+        let kind = |k: K| match k {
+            K::Addr32 => StoredKind::Addr32,
+            K::Addr16Lo => StoredKind::Addr16Lo,
+            K::Addr16Hi => StoredKind::Addr16Hi,
+            K::Addr16Ha => StoredKind::Addr16Ha,
+            K::Rel24 => StoredKind::Rel24,
+            K::Rel14 => StoredKind::Rel14,
+            K::EmbSda21 => StoredKind::EmbSda21,
+            K::Other(n) => StoredKind::Other(n),
+        };
+        let binding = |b: B| match b {
+            B::Global => StoredBinding::Global,
+            B::Local => StoredBinding::Local,
+            B::Weak => StoredBinding::Weak,
+        };
+        let relocs = |rs: &[mwdec_core::Reloc]| -> Vec<StoredReloc> {
+            rs.iter().map(|r| StoredReloc { offset: r.offset, kind: kind(r.kind), target: r.target.clone(), addend: r.addend }).collect()
+        };
+        StoredObject {
+            path: String::new(),
+            functions: o.functions.iter().map(|f| StoredFunction { name: f.name.clone(), binding: binding(f.binding), address: f.address, code: f.code.clone(), relocs: relocs(&f.relocs) }).collect(),
+            data: o
+                .data
+                .iter()
+                .map(|(k, d)| {
+                    let d = StoredData { name: d.name.clone(), binding: binding(d.binding), section: d.section.clone(), size: d.size, bytes: d.bytes.clone(), relocs: relocs(&d.relocs), address: d.address };
+                    (k.clone(), d)
+                })
+                .collect(),
+            all_symbols: o.all_symbols.clone(),
+            sections: o.sections.iter().map(|s| StoredSection { name: s.name.clone(), size: s.size, bytes: s.bytes.clone(), executable: s.executable, relocs: relocs(&s.relocs) }).collect(),
+            symbols: o.symbols.iter().map(|s| StoredSymbol { name: s.name.clone(), section: s.section.clone(), address: s.address, size: s.size, binding: binding(s.binding), is_func: s.is_func }).collect(),
+        }
+    }
+
+    fn into_object(self) -> mwdec_core::ObjectFile {
+        use mwdec_core::{DataSymbol, Function, ObjectFile, Reloc, RelocKind as K, Section, SymBinding as B, SymbolDef};
+        let kind = |k: StoredKind| match k {
+            StoredKind::Addr32 => K::Addr32,
+            StoredKind::Addr16Lo => K::Addr16Lo,
+            StoredKind::Addr16Hi => K::Addr16Hi,
+            StoredKind::Addr16Ha => K::Addr16Ha,
+            StoredKind::Rel24 => K::Rel24,
+            StoredKind::Rel14 => K::Rel14,
+            StoredKind::EmbSda21 => K::EmbSda21,
+            StoredKind::Other(n) => K::Other(n),
+        };
+        let binding = |b: StoredBinding| match b {
+            StoredBinding::Global => B::Global,
+            StoredBinding::Local => B::Local,
+            StoredBinding::Weak => B::Weak,
+        };
+        let relocs = |rs: Vec<StoredReloc>| -> Vec<Reloc> { rs.into_iter().map(|r| Reloc { offset: r.offset, kind: kind(r.kind), target: r.target, addend: r.addend }).collect() };
+        ObjectFile {
+            functions: self.functions.into_iter().map(|f| Function { name: f.name, binding: binding(f.binding), address: f.address, code: f.code, relocs: relocs(f.relocs) }).collect(),
+            data: self
+                .data
+                .into_iter()
+                .map(|(k, d)| {
+                    let d = DataSymbol { name: d.name, binding: binding(d.binding), section: d.section, size: d.size, bytes: d.bytes, relocs: relocs(d.relocs), address: d.address };
+                    (k, d)
+                })
+                .collect(),
+            all_symbols: self.all_symbols,
+            sections: self.sections.into_iter().map(|s| Section { name: s.name, size: s.size, bytes: s.bytes, executable: s.executable, relocs: relocs(s.relocs) }).collect(),
+            symbols: self.symbols.into_iter().map(|s| SymbolDef { name: s.name, section: s.section, address: s.address, size: s.size, binding: binding(s.binding), is_func: s.is_func }).collect(),
         }
     }
 }
@@ -397,7 +552,7 @@ pub fn minimal_object(obj: &mwdec_core::ObjectFile, f: &mwdec_core::Function, pr
         k += 1;
     }
     let rename = |n: &str| if let Some(rest) = n.strip_prefix(prefix) { format!("__P{rest}") } else { n.to_string() };
-    let mut out = ObjectFile { path: obj.path.clone(), ..Default::default() };
+    let mut out = ObjectFile::default();
     let mut func = f.clone();
     func.name = rename(&f.name);
     func.address = 0;

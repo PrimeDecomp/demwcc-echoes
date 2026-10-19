@@ -6,14 +6,16 @@ are in [DESIGN.md](DESIGN.md).
 ## Crates
 
 **`mwdec-core`**: shared data types and nothing else: the object model (`ObjectFile`,
-`Function`, `Reloc`, `Section`, `DataSymbol`, `SymbolDef`), project records (`Unit`,
+`Function`, `Reloc`, `Section`, `DataSymbol`, `SymbolDef`: mwcc-compare's `strict::elf` types,
+re-exported), project records (`Unit`,
 `DatasetEntry`), the type model (`Type`, `FuncSig`, `Class`, `Field`, `DeclInfo`, `TypeDb`) and
 `CompareResult`. Two small behaviour modules: `paths` (`project_root`, `work_base`, `work_dir`)
 and `memcap` (`install`, `stats`, `report_line`). Changes are additive only (add fields or
 variants, never rename or remove), since every crate depends on it.
 
 **`mwdec-obj`**: loads MWCC/dtk ELF objects into `ObjectFile` (`load_object`,
-`load_object_bytes`), resolving section-symbol relocations to named symbols; lookups
+`load_object_bytes`: mwcc-compare's `strict::elf::load`), resolving section-symbol relocations
+to named symbols; lookups
 (`find_function`, `data_bytes`, `c_string_at`, `symbol_location`) and disassembly via ppc750cl
 (`disassemble`, `disasm_word`).
 
@@ -30,7 +32,8 @@ project root with a bounded process pool: `precompile` (per-unit `.mch` precompi
 `MwccError` separates compile errors, crashes and timeouts. The `split` module works around
 compiler crashes with some precompiled headers (`repair`, `uses_split`). `compare`,
 `compare_detailed` and `compare_indexed` (with `ObjIndex`, `ExternIndex` for literals defined
-in other objects of the module) implement the comparator and return a `DiffClass`. The `fast`
+in other objects of the module) run mwcc-compare's strict level (`mwcc_compare::strict`) and
+return a `DiffClass`. The `fast`
 module (`enable_fast`, on for the search drivers) serves `compile_in` from persistent compilers:
 mwcc-wasm's `PersistPool` in process, for GC 2.6 / 2.7 (at most 2 per search worker, up to 6
 workers: 12 snapshots, each dropped after 2 idle minutes), with `compile_in_slow` as its normal

@@ -8,4 +8,5 @@ mwdec-core.workspace = true
 mwdec-obj.workspace = true
 mwdec-oracle = { path = "../mwdec-oracle" }
 mwcc-wasm.workspace = true
+mwcc-compare.workspace = true
 anyhow.workspace = true

@@ -1,4 +1,4 @@
-//! The unit-side half of placeholder resolution (`mwdec_mwcc::placeholder`): our definition of
+//! The unit-side half of placeholder resolution (`mwcc_compare::strict::PlaceholderProver`): our definition of
 //! a function referenced by name, made by compiling the sources that make the compiler emit it
 //! (`mwdec_emit::instantiate`) in the unit's context. Definitions are cached per symbol.
 use mwdec_core::{ObjectFile, TypeDb};

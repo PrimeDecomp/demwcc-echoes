@@ -432,7 +432,7 @@ pub fn cmd_harvest(root: &Path, work: &Path, a: HarvestArgs) -> Result<()> {
                             // one driver set per unit: its in-memory object cache and its fast-path
                             // compiler processes (2 workers; up to 3 units are kept) die with the unit
                             let cc = Compilers::new(&p.root, work, 6).with_fast_workers(2);
-                            let ui = unit_inputs_with_context(&p, &u, &cc, &ext.0.objs, true, context.clone(), Some(&ext.0))?;
+                            let ui = unit_inputs_with_context(&p, &u, &cc, &ext.0.objects, true, context.clone(), Some(&ext.0))?;
                             Ok((ui, context))
                         })();
                         *g = Some(Arc::new(match r {
@@ -577,7 +577,7 @@ fn run_one(us: &UnitSlot, ext: &(ExternIndex, ExternIndex), c: &Cand, a: &Harves
             return;
         }
     };
-    let ti = ObjIndex::with_externs(&ui.target, &ext.0);
+    let ti = ObjIndex::new(&ui.target).with_externs(Some(&ext.0));
     let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
     let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&ext.1), &c.symbol).with_prover(Some(&prover));
     let src = super::search_cmds::repair_or_variant(&scorer, choose_draft(ui, f, &scorer, src), super::search_cmds::variant_drafts(ui, f, true), ui.tracer.as_deref());
@@ -718,8 +718,8 @@ pub fn cmd_verify_units(root: &Path, units: &[String]) -> Result<()> {
                     continue;
                 }
             };
-            let ti = ObjIndex::with_externs(&target, text);
-            let oi = ObjIndex::with_externs(&ours, oext);
+            let ti = ObjIndex::new(&target).with_externs(Some(text));
+            let oi = ObjIndex::new(&ours).with_externs(Some(oext));
             for tf in &target.functions {
                 let v = match oi.function(&tf.name) {
                     Some(of) => {
@@ -767,7 +767,7 @@ pub fn cmd_repolish(root: &Path, work: &Path, dir: &Path, out: &Path, split: Opt
             let (u, context) = unit_context(&p, u, &idx)?;
             let ext = externs_for(&p, &u.name);
             let cc = Compilers::new(&p.root, work, 3);
-            unit_inputs_with_context(&p, &u, &cc, &ext.0.objs, true, context, Some(&ext.0))
+            unit_inputs_with_context(&p, &u, &cc, &ext.0.objects, true, context, Some(&ext.0))
         })();
         let ui = match r {
             Ok(ui) => ui,
@@ -781,7 +781,7 @@ pub fn cmd_repolish(root: &Path, work: &Path, dir: &Path, out: &Path, split: Opt
             let sym = v.get("symbol").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let src = v.get("source").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let Some(f) = mwdec_obj::find_function(&ui.target, &sym) else { continue };
-            let ti = ObjIndex::with_externs(&ui.target, &ext.0);
+            let ti = ObjIndex::new(&ui.target).with_externs(Some(&ext.0));
             let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
             let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&ext.1), &sym).with_prover(Some(&prover));
             // the stored result must still be exact here (same context and compiler)

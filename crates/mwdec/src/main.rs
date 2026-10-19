@@ -468,7 +468,7 @@ fn cmd_check(
     let ext = module_externs(&p, std::iter::once(u.name.as_str()));
     let (text, oext) = &ext[Project::module_of(&u.name)];
     let prover = placeholders::UnitProver::new(&m, &ctx, None);
-    let d = mwdec_mwcc::compare_indexed(&ObjIndex::with_externs(&target, text), tf, &ObjIndex::with_externs(&ours, oext).with_prover(Some(&prover)), of);
+    let d = mwdec_mwcc::compare_indexed(&ObjIndex::new(&target).with_externs(Some(text)), tf, &ObjIndex::new(&ours).with_externs(Some(oext)).with_prover(Some(&prover as &dyn mwdec_mwcc::PlaceholderProver).filter(|_| mwdec_mwcc::compare::placeholders_enabled())), of);
     let r = &d.result;
     println!(
         "{} {symbol}: score {:.1} ({}; target {:#x} bytes, ours {:#x}; ctx {:.0} ms, compile {:.0} ms{})",
@@ -545,8 +545,8 @@ fn cmd_selftest(root: &Path, limit: Option<usize>, unit_filter: Option<&str>, al
             let out: Vec<SelfRow> = match objs {
                 Err(err) => entries.iter().map(|e| row(e, DiffClass::Unresolved, vec![format!("load: {err}")])).collect(),
                 Ok((t, o)) => {
-                    let ti = ObjIndex::with_externs(&t, ext);
-                    let oi = ObjIndex::with_externs(&o, ours_ext);
+                    let ti = ObjIndex::new(&t).with_externs(Some(ext));
+                    let oi = ObjIndex::new(&o).with_externs(Some(ours_ext));
                     entries
                         .iter()
                         .map(|e| match (ti.function(&e.symbol), oi.function(&e.symbol)) {

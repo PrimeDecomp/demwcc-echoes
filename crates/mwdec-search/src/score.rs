@@ -522,9 +522,9 @@ impl<'a> Scorer<'a> {
         Scorer { mwcc, ctx, plain, target, tf, ours_ext, symbol: symbol.to_string(), pch_broken: Default::default(), prover: None, confirm_failures: Default::default() }
     }
 
-    /// Resolve target placeholders through `p` (see `mwdec_mwcc::placeholder`).
+    /// Resolve target placeholders through `p` (see `mwdec_mwcc::compare`; none with `MWDEC_NO_PLACEHOLDER`).
     pub fn with_prover(mut self, p: Option<&'a dyn mwdec_mwcc::PlaceholderProver>) -> Self {
-        self.prover = p;
+        self.prover = p.filter(|_| mwdec_mwcc::compare::placeholders_enabled());
         self
     }
 }
@@ -643,7 +643,7 @@ impl Scorer<'_> {
             return (Eval::Missing(ours.functions.iter().map(|f| f.name.clone()).collect()), ran);
         };
         let oi = match self.ours_ext {
-            Some(e) => ObjIndex::with_externs(&ours, e),
+            Some(e) => ObjIndex::new(&ours).with_externs(Some(e)),
             None => ObjIndex::new(&ours),
         }
         .with_prover(self.prover);
@@ -735,7 +735,7 @@ impl Scorer<'_> {
     pub fn extra_data(&self, src: &str) -> Vec<String> {
         let Ok(c) = self.mwcc.compile_in(self.ctx, src).or_else(|_| self.plain.map_or(Err(()), |p| self.mwcc.compile_in(p, src).map_err(|_| ()))) else { return vec![] };
         let Ok(o) = mwdec_obj::load_object_bytes("candidate.o", &c.obj) else { return vec![] };
-        let target = self.target.obj;
+        let target = self.target.object;
         let mut out: Vec<String> = o
             .data
             .values()
@@ -753,7 +753,7 @@ impl Scorer<'_> {
         let o = mwdec_obj::load_object_bytes("candidate.o", obj).ok()?;
         let of = mwdec_obj::find_function(&o, &self.symbol)?;
         let oi = match self.ours_ext {
-            Some(e) => ObjIndex::with_externs(&o, e),
+            Some(e) => ObjIndex::new(&o).with_externs(Some(e)),
             None => ObjIndex::new(&o),
         }
         .with_prover(self.prover);

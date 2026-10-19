@@ -152,6 +152,31 @@ pub enum NoDraft {
     Lift(String),
 }
 
+/// A non-local symbol `ext` defines: its symbol entry, containing section, and the section bytes
+/// from the symbol on (at most `max`). The index's own rule (the first weak definition, unless a
+/// global one follows; a name defined globally twice is ambiguous), applied over its objects in
+/// order: mwcc-compare's `ExternIndex` has no public symbol lookup.
+fn extern_defined<'a>(ext: &'a ExternIndex, name: &str, max: usize) -> Option<(&'a SymbolDef, &'a Section, &'a [u8])> {
+    let mut found: Option<Option<(&ObjectFile, &SymbolDef, bool)>> = None;
+    for o in &ext.objects {
+        for s in o.symbols.iter().filter(|s| s.name == name && s.binding != SymBinding::Local) {
+            let weak = s.binding == SymBinding::Weak;
+            found = match found {
+                None => Some(Some((o, s, weak))),
+                Some(Some((_, _, true))) if weak => continue,
+                Some(Some((_, _, true))) => Some(Some((o, s, weak))),
+                Some(_) if weak => continue,
+                Some(_) => Some(None),
+            };
+        }
+    }
+    let (o, d, _) = found??;
+    let sec = o.sections.iter().find(|s| s.name == d.section)?;
+    let start = (d.address as usize).min(sec.bytes.len());
+    let end = start.saturating_add(max).min(sec.bytes.len());
+    Some((d, sec, &sec.bytes[start..end]))
+}
+
 /// `target` plus copies of the literals (dtk `lbl_` / compiler-local names in `.sdata2`, `.rodata`,
 /// `.sdata`, `.data`) its code references but another target object of the module defines (shared
 /// literal pools split off by dtk). Without them the lifter emits `extern float lbl_<addr>;`
@@ -169,7 +194,7 @@ pub fn with_extern_literals(target: &ObjectFile, ext: &ExternIndex) -> Option<Ob
     want.dedup();
     let mut out: Option<ObjectFile> = None;
     for name in want {
-        let Some((def, sec, bytes)) = ext.defined(name, 4096) else { continue };
+        let Some((def, sec, bytes)) = extern_defined(ext, name, 4096) else { continue };
         if !matches!(sec.name.as_str(), ".sdata2" | ".rodata" | ".sdata" | ".data") || sec.bytes.is_empty() {
             continue;
         }
@@ -930,13 +955,13 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
     let cc = Compilers::new(root, work, a.workers.clamp(1, 6));
     let t = Instant::now();
     let (t_ext, o_ext) = externs_for(&p, &u.name);
-    let ui = unit_inputs(&p, u, &cc, &t_ext.objs, !a.no_db && a.init.is_none(), Some(&t_ext))?;
+    let ui = unit_inputs(&p, u, &cc, &t_ext.objects, !a.no_db && a.init.is_none(), Some(&t_ext))?;
     let f = mwdec_obj::find_function(&ui.target, &a.symbol).ok_or_else(|| anyhow!("{} not in {}", a.symbol, u.target_obj))?;
     let init = match &a.init {
         Some(path) => std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
         None => match draft(&ui, f) {
             Ok(s) if emitted_kind(&ui, f).is_some() || mwdec_emit::instantiate::is_template_instance(&f.name) => {
-                let ti = ObjIndex::with_externs(&ui.target, &t_ext);
+                let ti = ObjIndex::new(&ui.target).with_externs(Some(&t_ext));
                 let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
                 let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&o_ext), &a.symbol).with_prover(Some(&prover));
                 let mut c = instantiation_drafts(&ui, f);
@@ -951,7 +976,7 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
             Err(NoDraft::Lift(e)) => bail!("no first draft ({e}); pass --init <file.cpp>"),
         },
     };
-    let ti = ObjIndex::with_externs(&ui.target, &t_ext);
+    let ti = ObjIndex::new(&ui.target).with_externs(Some(&t_ext));
     let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
     let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&o_ext), &a.symbol).with_prover(Some(&prover));
     let init = if a.init.is_none() && emitted_kind(&ui, f).is_none() && !mwdec_emit::instantiate::is_template_instance(&f.name) {
@@ -1309,7 +1334,7 @@ pub fn cmd_eval(root: &Path, work: &Path, a: EvalArgs) -> Result<()> {
                             let r = p
                                 .unit(&e.unit)
                                 .ok_or_else(|| anyhow!("unknown unit"))
-                                .and_then(|u| unit_inputs(&p, u, &cc, &ext.0.objs, !a.no_db && drafter.is_none(), drafter.is_none().then_some(&ext.0)));
+                                .and_then(|u| unit_inputs(&p, u, &cc, &ext.0.objects, !a.no_db && drafter.is_none(), drafter.is_none().then_some(&ext.0)));
                             *g = Some(Arc::new(r.map_err(|e| e.to_string())));
                         }
                         g.clone().unwrap()
@@ -1414,7 +1439,7 @@ fn run_one(
         }
     };
     row.drafted = true;
-    let ti = ObjIndex::with_externs(&ui.target, &ext.0);
+    let ti = ObjIndex::new(&ui.target).with_externs(Some(&ext.0));
     let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
     let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&ext.1), &e.symbol).with_prover(Some(&prover));
     // draft-time decisions never act on an unconfirmed persistent-compiler failure

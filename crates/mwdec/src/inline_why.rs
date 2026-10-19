@@ -482,7 +482,7 @@ pub fn cmd_inline_why(root: &Path, work: &Path, unit: Option<String>, symbol: Op
     for (uname, syms) in by_unit {
         let Some(u) = p.unit(&uname) else { continue };
         let (t_ext, _) = externs_for(&p, &u.name);
-        let ui = match unit_inputs(&p, u, &cc, &t_ext.objs, true, Some(&t_ext)) {
+        let ui = match unit_inputs(&p, u, &cc, &t_ext.objects, true, Some(&t_ext)) {
             Ok(ui) => ui,
             Err(e) => {
                 eprintln!("{uname}: {e:#}");

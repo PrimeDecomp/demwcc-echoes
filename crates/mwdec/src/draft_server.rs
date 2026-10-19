@@ -173,7 +173,7 @@ pub fn serve(root: &Path, work: &Path, no_db: bool) -> Result<()> {
                 let m = Project::module_of(&u.name);
                 let ext = mwdec_mwcc::ExternIndex::layered(main, if m == "main" { vec![] } else { p.load_module_data(m) });
                 drop(ext_t);
-                let objs: &[Arc<ObjectFile>] = if no_db { &[] } else { &ext.objs };
+                let objs: &[Arc<ObjectFile>] = if no_db { &[] } else { &ext.objects };
                 unit_inputs(&p, u, &cc, objs, !no_db, Some(&ext)).map_err(|e| e.to_string())
             });
             cur = Some((unit.clone(), ui));
