@@ -1,5 +1,5 @@
-//! The tracer in process: the compiler built with mwcc-tools' oracle hooks (`oracle.wasm`, [`crate::wasm`]) writes
-//! records of what it decides, read here into the [`Trace`] the debugger tracer ([`crate::tracer`]) gives.
+//! The tracer in process: the compiler built with mwcc-tools' oracle hooks (`mwcc.wasm`, [`crate::wasm`]) writes
+//! records of what it decides, read here into a [`Trace`] ([`crate::tracer`]).
 //!
 //! - colouring: `ra.graph` (the class), `ra.node` (each node before simplification), `ra.temporaries` and `ra.value`
 //!   (the class's temporaries; each node's object, argument and rematerialization), `ra.order` (the stack select
@@ -114,7 +114,7 @@ fn instruction(records: &[Record], at: usize, opcodes: &HashMap<i16, (String, u8
         .map(|o| (o.hex("p"), o.get("name").unwrap_or("?")))
         .collect();
     let rendered = if !(0..471).contains(&op) || !(0..200).contains(&argc) {
-        PInstr { op, name: "??".into(), text: format!("?? op={op} argc={argc}"), regs: vec![] }
+        PInstr { op, text: format!("?? op={op} argc={argc}"), regs: vec![] }
     } else {
         let name = opcodes.get(&op).map_or_else(|| format!("op{op}"), |(n, _)| n.clone());
         render_pcode(op, argc, r.hex("flags"), &raw, name, |p| objects.get(&p).map_or("?".into(), |n| n.to_string()))
@@ -222,7 +222,7 @@ struct Block {
 
 impl Block {
     fn finish(self, function: &str, opcodes: &HashMap<i16, (String, u8)>) -> Option<SchedBlock> {
-        // (a block the scheduler made no DAG for, as the debugger tracer has it)
+        // (a block the scheduler made no DAG for, as mwdec's earlier debugger tracer had it)
         if self.nodes.is_empty() {
             return None;
         }
@@ -443,7 +443,7 @@ pub fn parse(text: &str, opts: &TraceOptions) -> Trace {
                     _ => "",
                 };
                 let wanted = opts.pcode.iter().any(|s| s == stage || s == "precolor" && stage.starts_with("precolor-"));
-                // (the debugger names the function select colours by its object, the others by the expansion)
+                // (the function select colours is named by its object, the others by the expansion, as the earlier debugger tracer did)
                 let name = if kind.starts_with("st.precolor") { r.get("function").unwrap_or("?") } else { &function };
                 dump = wanted.then(|| PcodeDump { stage: stage.into(), function: name.to_string(), lines: vec![] });
             }
@@ -509,7 +509,7 @@ fn after(records: &[Record], at: usize, kind: &str) -> Option<usize> {
     (records[next].kind == kind).then_some(next)
 }
 
-/// Why a copy does or does not propagate into a use (`cp.use reason=`), as the debugger tracer says it.
+/// Why a copy does or does not propagate into a use (`cp.use reason=`), as mwdec says it.
 const COPY_REASONS: [&str; 6] = [
     "use is a move (copies never propagate into moves)",
     "use reads and writes the copied register",
@@ -519,8 +519,8 @@ const COPY_REASONS: [&str; 6] = [
     "ok",
 ];
 
-/// The peephole's patterns (gc2's names, `ph.hit rule=`) and the names the debugger tracer gives them
-/// ([`crate::tracer::PEEPHOLE_RULES`]). (gc2's sources have them in the executable's order, reversed.)
+/// The peephole's patterns (gc2's names, `ph.hit rule=`) and the names mwdec gives them (after the
+/// executable's handlers). (gc2's sources have them in the executable's order, reversed.)
 const PATTERNS: &[(&str, &str)] = &[
     ("RLWINM_RLWIMI_STH", "fold_rlwimi_rlwinm_to_sthbrx"),
     ("RLWINM_RLWIMI_STW", "fold_rlwimi_store_to_stwbrx"),

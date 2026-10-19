@@ -68,7 +68,7 @@ pub struct SearchConfig {
     /// Neighbours kept per expansion.
     pub enum_cap: usize,
     /// Scheduler advice (`mwdec_oracle::advice`) on reorder diffs, at most this many calls per
-    /// search (each is a compile under the debugger plus a `-sym on` compile; 0 = off).
+    /// search (each is a traced compile plus a `-sym on` compile; 0 = off).
     pub max_advice: u64,
 }
 

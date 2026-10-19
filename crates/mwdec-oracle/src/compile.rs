@@ -1,4 +1,4 @@
-//! Run mwcceppc.exe (in process as WebAssembly when it has a module: [`crate::wasm`]) on a source
+//! Run mwcceppc.exe (in process as WebAssembly for GC 2.6 / 2.7: [`crate::wasm`]) on a source
 //! string and return the object bytes.
 
 use crate::flags::{profile_flags, Profile};
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// How long an in-process compile may run (the executable runs without a limit).
+/// How long an in-process compile may run (an executable runs without a limit).
 const WASM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Clone, Debug)]
@@ -98,8 +98,9 @@ impl Compiler {
         let exe = self.exe();
         let mut args = self.flags();
         args.extend(["-c".into(), src.to_string_lossy().into_owned(), "-o".into(), obj.to_string_lossy().into_owned()]);
-        if let Some(run) = crate::wasm::run(&exe, &args, &self.work, WASM_TIMEOUT) {
-            let run = run.with_context(|| format!("running {}", exe.display()))?;
+        // (GC 2.6 / 2.7 run as their module; the others as processes)
+        if let Some(loaded) = crate::wasm::loaded(&exe)? {
+            let run = crate::wasm::run(&loaded, &exe, &args, &self.work, WASM_TIMEOUT).with_context(|| format!("running {}", exe.display()))?;
             if run.timed_out {
                 bail!("compile timed out after {}s", WASM_TIMEOUT.as_secs());
             }

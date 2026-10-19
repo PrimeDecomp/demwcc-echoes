@@ -5,10 +5,10 @@
 //!   cache of compiled candidates (memory + disk), and a bounded process pool (default 6).
 //! - [`compile`]: the simple free-function form (no PCH, no cache).
 //! - [`compare`] / [`compare_detailed`]: the strict comparator.
-//! - Fast path ([`Mwcc::enable_fast`], module `fast`): candidates compiled by persistent compiler
-//!   processes that parse the context once; failures and exact matches are redone normally.
-//! - GC 2.6 / 2.7 compile in process as WebAssembly when mwcc-tools' module is built
-//!   ([`mwdec_oracle::wasm`]); other compilers, and `MWDEC_WASM=0`, run the executable.
+//! - Fast path ([`Mwcc::enable_fast`], module `fast`): candidates compiled by persistent compilers
+//!   that parse the context once; untrusted failures and exact matches are redone normally.
+//! - GC 2.6 / 2.7 compile in process as WebAssembly, as mwcc-tools' module
+//!   ([`mwdec_oracle::wasm`], required); other compilers run the executable.
 //!
 //! MWCC quirk: path arguments must be absolute Windows paths with backslashes; forward slashes in
 //! `-precompile` / `-prefix` arguments are rejected ("filename is invalid").
@@ -283,10 +283,8 @@ pub struct Mwcc {
     pub disk_cache: Option<PathBuf>,
     pub timeout: Duration,
     pool: Arc<Pool>,
-    /// Persistent-compiler fast path for candidate compiles (`enable_fast`): mwcc-wasm's pool for a
-    /// compiler with a WebAssembly module, else debugged compiler processes.
+    /// Persistent-compiler fast path for candidate compiles (`enable_fast`): mwcc-wasm's pool.
     fast: std::sync::RwLock<Option<Arc<fast::FastPool>>>,
-    wasm_fast: std::sync::RwLock<Option<Arc<fast::WasmPool>>>,
     counter: AtomicU64,
     mem_cache: Mutex<MemCache>,
     pch_locks: Mutex<HashMap<u128, Arc<Mutex<()>>>>,
@@ -308,7 +306,6 @@ impl Mwcc {
             timeout: Duration::from_secs(120),
             pool: Arc::new(Pool::new(jobs)),
             fast: std::sync::RwLock::new(None),
-            wasm_fast: std::sync::RwLock::new(None),
             counter: AtomicU64::new(0),
             mem_cache: Mutex::new(MemCache::new()),
             pch_locks: Mutex::new(HashMap::new()),
@@ -332,9 +329,9 @@ impl Mwcc {
     }
 
     /// The compiler's identity in cache keys: its path, and whether it runs as WebAssembly (the
-    /// precompiled headers of the two are not interchangeable).
+    /// precompiled headers of the module and the executable are not interchangeable).
     fn compiler_id(&self) -> String {
-        if mwdec_oracle::wasm::available(&self.root.join(&self.compiler)) {
+        if mwdec_oracle::wasm::module_for(&self.root.join(&self.compiler)).is_some() {
             format!("{}+wasm", self.compiler)
         } else {
             self.compiler.clone()
@@ -348,11 +345,14 @@ impl Mwcc {
         mwdec_core::prof::add("mwcc.slot_wait", w.elapsed().as_secs_f64());
         let exe = self.root.join(&self.compiler);
         let t = Instant::now();
-        let wasm = {
-            let _p = mwdec_core::prof::span("mwcc.wasm");
-            mwdec_oracle::wasm::run(&exe, args, &self.root, self.timeout)
-        };
-        if let Some(run) = wasm {
+        // GC 2.6 / 2.7 run as their module (a missing one is an error, not a crash); the others
+        // (the SDK's GC 1.x) as processes
+        let loaded = mwdec_oracle::wasm::loaded(&exe).map_err(|e| MwccError::Io(format!("{e:#}")))?;
+        if let Some(loaded) = loaded {
+            let run = {
+                let _p = mwdec_core::prof::span("mwcc.wasm");
+                mwdec_oracle::wasm::run(&loaded, &exe, args, &self.root, self.timeout)
+            };
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             return match run {
                 Ok(r) if r.timed_out => Err(MwccError::Timeout { seconds: self.timeout.as_secs() }),
@@ -606,75 +606,25 @@ impl Mwcc {
             self.mem_cache.lock().unwrap().insert(key, e.clone());
             return hit(e, self.cache_path(key, "o").unwrap_or_default());
         }
-        let mut fast_failed = None;
         // Test hook: a persistent compiler that wrongly reports (and trusts) a compile failure
         // for candidates containing this text (`*`: for every candidate).
         if allow_fast && std::env::var("MWDEC_TEST_TRUSTED_FAIL").is_ok_and(|t| t == "*" || (!t.is_empty() && code.contains(t.as_str()))) {
             return Err(MwccError::Compile { status: Some(1), messages: UNCONFIRMED_FAILURE.into() });
         }
         if allow_fast {
-            if let Some(r) = self.compile_wasm_fast(ctx, code, key) {
+            if let Some(r) = self.compile_fast(ctx, code, key) {
                 return r;
             }
         }
-        if allow_fast {
-            if let Some((fp, spec)) = self.fast_spec(ctx) {
-                let t = Instant::now();
-                match fp.compile(&spec, &fast_body(ctx, code)) {
-                    fast::Outcome::Obj(obj) => {
-                        let obj = Arc::new(obj);
-                        if std::env::var_os("MWDEC_PERSIST_VERIFY").is_some() {
-                            // check mode: every fast object against a normal compile
-                            if let Ok(n) = self.compile_in_mode(ctx, code, false) {
-                                let same = split::same_code(&obj, &n.obj);
-                                fp.note_verify(same);
-                                if !same {
-                                    eprintln!("mwdec-mwcc: fast path and normal compile differ for:\n{code}");
-                                    return Ok(n);
-                                }
-                            }
-                        }
-                        self.mem_cache.lock().unwrap().insert(key, Ok((obj.clone(), true)));
-                        let ms = t.elapsed().as_secs_f64() * 1000.0;
-                        mwdec_core::prof::add("mwcc.fast_obj", ms / 1000.0);
-                        return Ok(Compiled { obj, obj_path: PathBuf::new(), messages: String::new(), ms, cache_hit: false, fast: true });
-                    }
-                    fast::Outcome::Failed(w) => {
-                        mwdec_core::prof::add("mwcc.fast_failed", t.elapsed().as_secs_f64());
-                        if fp.trusted_failure(w) {
-                            // a compile error without its messages (not cached: unconfirmed)
-                            return Err(MwccError::Compile { status: Some(1), messages: UNCONFIRMED_FAILURE.into() });
-                        }
-                        fast_failed = Some((fp, w))
-                    }
-                    fast::Outcome::NotReady => {}
-                }
-            }
-        }
-        let res = {
-            let _p = mwdec_core::prof::span(if ctx.mch.is_some() { "mwcc.compile_pch" } else { "mwcc.compile_plain" });
-            self.compile_in_slow(ctx, code, key)
-        };
-        if let Some((fp, _)) = &fast_failed {
-            fp.note_recompiled();
-        }
-        if let (Some((fp, w)), Err(MwccError::Compile { .. })) = (&fast_failed, &res) {
-            fp.failure_confirmed(*w);
-        }
-        if let (Some((fp, w)), Ok(_)) = (&fast_failed, &res) {
-            fp.poisoned(*w);
-            if std::env::var_os("MWDEC_MWCC_LOG").is_some() {
-                eprintln!("mwdec-mwcc: fast path failed, normal compile succeeded");
-            }
-        }
-        res
+        let _p = mwdec_core::prof::span(if ctx.mch.is_some() { "mwcc.compile_pch" } else { "mwcc.compile_plain" });
+        self.compile_in_slow(ctx, code, key)
     }
 
     /// `compile_in` through mwcc-wasm's persistent pool (`None`: the fast path does not apply). Its
     /// normal compile is [`Mwcc::compile_in_slow`]'s: a persistent result is checked against it
     /// where the pool does not trust it, and the pool's result is that one then.
-    fn compile_wasm_fast(&self, ctx: &UnitContext, code: &str, key: u128) -> Option<Result<Compiled, MwccError>> {
-        let (wp, context) = self.wasm_spec(ctx)?;
+    fn compile_fast(&self, ctx: &UnitContext, code: &str, key: u128) -> Option<Result<Compiled, MwccError>> {
+        let (wp, context) = self.fast_context(ctx)?;
         let t = Instant::now();
         let slow: std::cell::RefCell<Option<Result<Compiled, MwccError>>> = Default::default();
         let normal = || -> Result<mwcc_wasm::pool::Compiled, MwccError> {
@@ -780,26 +730,18 @@ impl Mwcc {
         res
     }
 
-    /// Turn on the fast path for candidate compiles: up to `workers` (at most [`MAX_FAST_WORKERS`]) persistent
-    /// compiler threads (module `fast`), started on first use. GC/2.7, or a compiler with a
-    /// persistent WebAssembly module; contexts compiled with line information (`-sym`, `-g`) always
-    /// compile normally. `MWDEC_PERSIST=0` in the environment keeps it off. Returns whether it is on.
+    /// Turn on the fast path for candidate compiles: persistent compilers for up to `workers` (at
+    /// most [`MAX_FAST_WORKERS`]) search workers (module `fast`), started on demand. A compiler
+    /// with a WebAssembly module (GC 2.6 / 2.7); contexts compiled with line information (`-sym`,
+    /// `-g`) always compile normally. `MWDEC_PERSIST=0` in the environment keeps it off. Returns
+    /// whether it is on.
     pub fn enable_fast(&self, workers: usize) -> bool {
-        let native = self.compiler.replace('\\', "/").contains("GC/2.7/");
-        let wasm = mwdec_oracle::wasm::persistent_available(&self.root.join(&self.compiler));
-        if fast_disabled_by_env() || !(native || wasm) {
+        if fast_disabled_by_env() || !matches!(mwdec_oracle::wasm::loaded(&self.root.join(&self.compiler)), Ok(Some(_))) {
             return false;
-        }
-        if wasm {
-            let mut f = self.wasm_fast.write().unwrap();
-            if f.is_none() {
-                *f = Some(Arc::new(fast::WasmPool::new(workers.clamp(1, MAX_FAST_WORKERS))));
-            }
-            return true;
         }
         let mut f = self.fast.write().unwrap();
         if f.is_none() {
-            *f = Some(Arc::new(fast::FastPool::new(workers.clamp(1, MAX_FAST_WORKERS), self.pool.clone())));
+            *f = Some(Arc::new(fast::FastPool::new(workers.clamp(1, MAX_FAST_WORKERS))));
         }
         true
     }
@@ -808,38 +750,25 @@ impl Mwcc {
     /// loop starts (instead of starting them on demand while candidates compile normally).
     /// Waits at most `wait`; returns how many hold it (0 when the fast path does not apply).
     pub fn warm_fast(&self, ctx: &UnitContext, n: usize, wait: std::time::Duration) -> usize {
-        if let Some((wp, context)) = self.wasm_spec(ctx) {
-            return wp.pool.warm(&context, n, wait);
-        }
-        match self.fast_spec(ctx) {
-            Some((fp, spec)) => fp.warm(&spec, n, wait),
+        match self.fast_context(ctx) {
+            Some((fp, context)) => fp.pool.warm(&context, n, wait),
             None => 0,
         }
     }
 
-    /// End the fast path's workers and their compiler processes (it stays off afterwards).
+    /// End the fast path's persistent compilers (it stays off afterwards).
     pub fn shutdown_fast(&self) {
-        drop(self.wasm_fast.write().unwrap().take());
-        let f = self.fast.write().unwrap().take();
-        if let Some(f) = f {
-            f.shutdown();
-        }
+        drop(self.fast.write().unwrap().take());
     }
 
     /// Counters of the fast path (`None` if it is off).
     pub fn fast_stats(&self) -> Option<FastStats> {
-        if let Some(w) = self.wasm_fast.read().unwrap().as_ref() {
-            return Some(w.stats());
-        }
         self.fast.read().unwrap().as_ref().map(|f| f.stats())
     }
 
     /// Record the normal-compile confirmation of an exact match found with a fast-path object
     /// (`agreed`: the normal compile matched too).
     pub fn note_fast_confirm(&self, agreed: bool) {
-        if let Some(w) = self.wasm_fast.read().unwrap().as_ref() {
-            w.note_confirm(agreed);
-        }
         if let Some(f) = self.fast.read().unwrap().as_ref() {
             f.note_confirm(agreed);
         }
@@ -848,21 +777,13 @@ impl Mwcc {
         }
     }
 
-    /// The wasm fast path and its context for `ctx`, if both apply.
-    fn wasm_spec(&self, ctx: &UnitContext) -> Option<(Arc<fast::WasmPool>, Arc<mwcc_wasm::pool::Context>)> {
-        let wp = self.wasm_fast.read().unwrap().clone()?;
+    /// The fast path and its context for `ctx`, if both apply.
+    fn fast_context(&self, ctx: &UnitContext) -> Option<(Arc<fast::FastPool>, Arc<mwcc_wasm::pool::Context>)> {
+        let wp = self.fast.read().unwrap().clone()?;
         let spec = self.spec_of(ctx)?;
-        let loaded = mwdec_oracle::wasm::loaded(&self.root.join(&self.compiler))?;
+        let loaded = mwdec_oracle::wasm::loaded(&self.root.join(&self.compiler)).ok()??;
         let context = wp.context(&spec, loaded).ok()?;
         Some((wp, context))
-    }
-
-    /// The fast path and the persistent-compiler spec for `ctx`, if both apply.
-    fn fast_spec(&self, ctx: &UnitContext) -> Option<(Arc<fast::FastPool>, Arc<fast::Spec>)> {
-        let fp = self.fast.read().unwrap().clone()?;
-        let spec = self.spec_of(ctx)?;
-        let spec = fp.spec(spec.key, || spec.as_ref().clone());
-        Some((fp, spec))
     }
 
     /// The persistent-compiler spec of `ctx` (`None`: contexts compiled with line information,

@@ -375,7 +375,7 @@ no compiler. All compiler use is concentrated in mwdec-mwcc (candidate compiles,
   target register holds a param, temp or named local), `sched` / `schedcheck` / `explain`
   (list scheduler pick rule; whether an order difference is forced by a dependence, by register
   reuse, or by statement order), `iro` (the front-end optimizer's own dump), `tracer` (the
-  compiler's own records, or the unmodified compiler under a minimal debugger: inliner decisions,
+  compiler's own records, from the module's trace hooks: inliner decisions,
   colouring, PCode). The models
   are validated against the real compiler on generated functions (`ra-fuzz`, `ra-simplify`,
   `sched-alias-check`) and, source-free, on train-split target code (`ra-scan`,

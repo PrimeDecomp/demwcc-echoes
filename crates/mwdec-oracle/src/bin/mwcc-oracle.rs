@@ -3,7 +3,7 @@
 //! mwcc-oracle asm <file.cpp|-e CODE> [--fn PAT]... [--profile P] [--offsets] [--data] [-- extra flags]
 //!     compile with project flags, print annotated disassembly (functions in emission order)
 //! mwcc-oracle trace <file.cpp|-e CODE> [--fn PAT] [--all] [--json] [--pcode initial,presched,precolor] [--fix r30:r31,...]
-//!     REAL compiler internals (GC/2.7: the oracle module, or the executable under a debugger): per function/class every value's vreg, name, kind
+//!     REAL compiler internals (GC 2.6 / 2.7, the module's trace hooks): per function/class every value's vreg, name, kind
 //!     (param/named/FE temp/temp), IG degree, register, colouring order, K-blocked; --fix explains how
 //!     to move candidate registers to target registers
 //! mwcc-oracle inline <file.cpp|-e CODE> [--fn CALLER] [--all] [--full] [--json]

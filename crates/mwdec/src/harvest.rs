@@ -480,8 +480,8 @@ pub fn cmd_harvest(root: &Path, work: &Path, a: HarvestArgs) -> Result<()> {
     eprintln!("harvest: {} exact of {} attempted in {:.0}s", n_exact.into_inner(), cands.len(), t0.elapsed().as_secs_f64());
     // Every result is written and flushed. Exit now instead of tearing down the cached unit
     // drivers: their persistent compilers (and any start still in flight on a fast-path worker)
-    // could otherwise keep the process alive after the last candidate. Debugged compiler
-    // processes end with their debugger, child compilers with the memory-cap job.
+    // could otherwise keep the process alive after the last candidate. Child compilers end
+    // with the memory-cap job.
     for f in [&attempts_file, &exact_file, &started_file] {
         let _ = f.lock().map(|mut f| f.flush());
     }
@@ -495,9 +495,9 @@ pub fn cmd_harvest(root: &Path, work: &Path, a: HarvestArgs) -> Result<()> {
 const CANDIDATE_GRACE_SECS: u64 = 300;
 
 /// End this process now, without running library teardown: `ExitProcess` terminates the other
-/// threads (fast-path workers, debugger loops of persistent compilers) wherever they are and then
-/// runs DLL detach code, which can wait forever on a lock one of them held. Results are flushed
-/// by the caller; debugged compilers end with their debugger.
+/// threads (persistent-compiler starts and the pool's reaper) wherever they are and then runs DLL
+/// detach code, which can wait forever on a lock one of them held. Results are flushed by the
+/// caller.
 fn end_process(code: i32) -> ! {
     #[cfg(windows)]
     {

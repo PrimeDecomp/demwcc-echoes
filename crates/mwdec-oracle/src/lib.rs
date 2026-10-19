@@ -14,7 +14,6 @@ pub mod flags;
 pub mod hints;
 pub mod iro;
 pub mod oracle_trace;
-pub mod persist;
 pub mod regalloc;
 pub mod sched;
 pub mod schedcheck;

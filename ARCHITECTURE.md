@@ -31,11 +31,10 @@ project root with a bounded process pool: `precompile` (per-unit `.mch` precompi
 compiler crashes with some precompiled headers (`repair`, `uses_split`). `compare`,
 `compare_detailed` and `compare_indexed` (with `ObjIndex`, `ExternIndex` for literals defined
 in other objects of the module) implement the comparator and return a `DiffClass`. The `fast`
-module (`enable_fast`, on for the search drivers) serves `compile_in` from persistent compilers.
-For GC 2.6 / 2.7 that is mwcc-wasm's `PersistPool` in process (at most 2 per search worker, up to
-6 workers: 12 snapshots, each dropped after 2 idle minutes), with `compile_in_slow` as its normal
-compile; for other compilers, debugged compiler processes (`mwdec_oracle::persist`) on dedicated
-worker threads. A fast failure with a compiler diagnostic is trusted (one in 8 is still compiled
+module (`enable_fast`, on for the search drivers) serves `compile_in` from persistent compilers:
+mwcc-wasm's `PersistPool` in process, for GC 2.6 / 2.7 (at most 2 per search worker, up to 6
+workers: 12 snapshots, each dropped after 2 idle minutes), with `compile_in_slow` as its normal
+compile. Other compilers compile normally. A fast failure with a compiler diagnostic is trusted (one in 8 is still compiled
 normally) and reported with `UNCONFIRMED_FAILURE` before its messages, so draft-time decisions
 (`Scorer.confirm_failures`) confirm it; `Compiled::fast` marks fast objects and
 `compile_in_normal` confirms exact matches.
@@ -69,10 +68,9 @@ matches and rewrites (`matcher`). `ProbeCache` keeps templates on disk across un
 **`mwdec-oracle`**: compiler experiments and models, independent of the drafter. Library:
 `compile::Compiler` + `flags::profile_flags`, `asm` (annotated listings), `variants` (experiment
 files with checked expectations), `webs`, `regalloc`, `hints`, `sched`, `schedcheck`, `explain`,
-`iro`, `tracer` (the compiler's decisions: `oracle_trace` reads the records of mwcc-tools' oracle
-module, in process; without it, the unmodified compiler under a minimal debugger). Binaries:
-`mwcc-oracle` (asm / trace / inline / iro front end), `trace-parity` (both tracers on the same
-sources, compared field by field) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,
+`iro`, `tracer` (the compiler's decisions: `oracle_trace` reads the records of the module's trace
+hooks, in process; GC 2.6 / 2.7 only). Binaries: `mwcc-oracle` (asm / trace / inline / iro front
+end) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,
 `ra-spill-scan`, `explain-check`, `sched-alias-check`.
 
 **`mwdec-search`**: the compiler-in-the-loop permuter. `search(&Scorer, init, &SearchConfig) ->
@@ -260,7 +258,7 @@ with it; nothing grows with the number of functions processed.
 | split-PCH repairs (`<hash>.split`) | `mwdec_mwcc::split` | disk, next to the PCH | one per context |
 | compiled candidates (`<hash>.o` / `.err`) | `Mwcc::compile_in` | disk: `<mwcc work>/cache` | off for search drivers (`Compilers::for_unit` sets `disk_cache = None`); on for `check` and probe drivers |
 | compiled candidates | `Mwcc` `MemCache` | memory | byte budget, 96 MB default (`MWDEC_MEMCACHE_MB`), oldest evicted first; per driver |
-| parsed contexts (persistent compiler snapshots) | `Mwcc` fast path | memory + one idle compiler each (in process with `mwcc.wasm`: a snapshot of 5-30 MB and its instance, about 70 MB together on CStateManager; else a process) | at most workers (<= 6) x 2 per driver, LRU, an idle one dropped after 2 minutes; ended with the driver (harvest: 2 workers per unit driver); `MWDEC_PERSIST=0` turns it off |
+| parsed contexts (persistent compiler snapshots) | `Mwcc` fast path | memory + one idle compiler each (in process with `mwcc.wasm`: a snapshot of 5-30 MB and its instance, about 70 MB together on CStateManager) | at most workers (<= 6) x 2 per driver, LRU, an idle one dropped after 2 minutes; ended with the driver (harvest: 2 workers per unit driver); `MWDEC_PERSIST=0` turns it off |
 | TypeDb per context (`<hash>.json.gz`) | `mwdec_ctx::build_typedb_in` | disk: `<work base>/mwdec-ctx/ctxcache` | one per (context, flags, root) |
 | inline templates and probe failures | `mwdec_inline::ProbeCache` | disk: `<work base>/mwdec-inline/tcache/<generation>` | keyed by probe text + compiler + flags |
 | probe compiles | `Compilers::probe_driver` | disk: `<mwcc work>/inline-probes/<compiler>` | shared across units and runs |
