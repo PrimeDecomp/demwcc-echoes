@@ -644,6 +644,9 @@ impl Mwcc {
             let _p = mwdec_core::prof::span(if ctx.mch.is_some() { "mwcc.compile_pch" } else { "mwcc.compile_plain" });
             self.compile_in_slow(ctx, code, key)
         };
+        if let Some((fp, _)) = &fast_failed {
+            fp.note_recompiled();
+        }
         if let (Some((fp, w)), Err(MwccError::Compile { .. })) = (&fast_failed, &res) {
             fp.failure_confirmed(*w);
         }

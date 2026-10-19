@@ -68,6 +68,8 @@ pub struct FastStats {
     /// ... of which the normal compile succeeded (the fast path should never reject a candidate
     /// the compiler accepts).
     pub failed_normal_ok: u64,
+    /// ... compiled normally again (the others were trusted as they were).
+    pub failed_recompiled: u64,
     /// Requests compiled normally because no persistent compiler was ready.
     pub not_ready: u64,
     /// Persistent compilers started / failed to start.
@@ -92,6 +94,7 @@ impl FastStats {
         self.compiles += o.compiles;
         self.failed += o.failed;
         self.failed_normal_ok += o.failed_normal_ok;
+        self.failed_recompiled += o.failed_recompiled;
         self.not_ready += o.not_ready;
         self.starts += o.starts;
         self.start_failures += o.start_failures;
@@ -115,11 +118,12 @@ impl FastStats {
         let avg = if self.compiles > 0 { self.compile_ms / self.compiles as f64 } else { 0.0 };
         let avg_start = if self.starts > 0 { self.start_ms / self.starts as f64 } else { 0.0 };
         format!(
-            "fast path: {} compiles ({avg:.1} ms avg), {} failed ({} accepted by a normal compile), {} not ready; \
+            "fast path: {} compiles ({avg:.1} ms avg), {} failed ({} compiled normally again, {} accepted by a normal compile), {} not ready; \
              {} starts ({avg_start:.0} ms avg, {} failed), max {} snapshots; {} exact confirmations ({} disagreed), \
              {} verified ({} disagreed)",
             self.compiles,
             self.failed,
+            self.failed_recompiled,
             self.failed_normal_ok,
             self.not_ready,
             self.starts,
@@ -138,6 +142,7 @@ struct Counters {
     compiles: AtomicU64,
     failed: AtomicU64,
     failed_normal_ok: AtomicU64,
+    failed_recompiled: AtomicU64,
     not_ready: AtomicU64,
     starts: AtomicU64,
     start_failures: AtomicU64,
@@ -400,6 +405,11 @@ impl FastPool {
         true
     }
 
+    /// A failure that was compiled normally again (whatever that gave).
+    pub fn note_recompiled(&self) {
+        self.shared.counters.failed_recompiled.fetch_add(1, Relaxed);
+    }
+
     /// A failure of worker `w` that a normal compile confirmed as a compile error.
     pub fn failure_confirmed(&self, w: usize) {
         self.trust[w].fetch_add(1, Relaxed);
@@ -425,6 +435,7 @@ impl FastPool {
             compiles: c.compiles.load(Relaxed),
             failed: c.failed.load(Relaxed),
             failed_normal_ok: c.failed_normal_ok.load(Relaxed),
+            failed_recompiled: c.failed_recompiled.load(Relaxed),
             not_ready: c.not_ready.load(Relaxed),
             starts: c.starts.load(Relaxed),
             start_failures: c.start_failures.load(Relaxed),
