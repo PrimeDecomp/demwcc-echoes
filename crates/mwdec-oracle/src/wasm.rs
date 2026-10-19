@@ -196,6 +196,7 @@ fn execute(
                     trace,
                     overlay: None,
                     transcode_sjis: false,
+                    record_reads: false,
                 })
             })
             .map_err(|e| anyhow!("starting the compiler's thread: {e}"))?
@@ -257,6 +258,7 @@ impl Persistent {
                         trace: false,
                         overlay: None,
                         transcode_sjis: false,
+                        record_reads: false,
                     },
                     capacity,
                 )
