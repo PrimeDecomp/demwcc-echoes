@@ -817,6 +817,7 @@ name = "mwdec-mwcc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mwcc-wasm",
  "mwdec-core",
  "mwdec-obj",
  "mwdec-oracle",
