@@ -20,6 +20,8 @@ through a chain of intermediate representations (instructions, CFG, per-block st
 structured statement tree) to C++ text, using types recovered from the project's headers. A
 **searcher** then compiles that text with the real compiler, compares it strictly with the
 target, and applies source-level mutations until the object is identical or the budget runs out.
+`mwdec match` also reports objdiff's per-function match % of the initial and best candidates
+(report only; the search ranks by the strict comparator).
 
 ## Documentation
 
