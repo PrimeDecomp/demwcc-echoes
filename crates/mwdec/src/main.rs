@@ -449,6 +449,10 @@ fn cmd_check(
             println!("COMPILER CRASH\n{e}");
             std::process::exit(3);
         }
+        Err(e @ mwdec_mwcc::MwccError::OutOfMemory { .. }) => {
+            println!("OUT OF MEMORY\n{e}");
+            std::process::exit(4);
+        }
         Err(e) => {
             println!("COMPILE ERROR\n{e}");
             std::process::exit(2);

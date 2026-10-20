@@ -299,7 +299,8 @@ exhausting the machine. Elsewhere it is a no-op.
   allocation failure.
 - In-process (WebAssembly) compiles allocate their memory in mwdec's own process, under the
   same cap. mwcc-wasm also limits each run to 1 GiB (`MWCC_WASM_MEMORY_MB`): past it, the run
-  stops with "out of memory" (a crash to `MwccError`). The fast path's 12 snapshots and their
+  stops with "out of memory" (`MwccError::OutOfMemory`, the search's
+  `Eval::OutOfMemory`: not a crash, so no PCH repair and no retry; never cached). The fast path's 12 snapshots and their
   instances take about 70 MB each on CStateManager. The job's limit counts the process
   compiles (the SDK's GC 1.x) too.
 - Reporting: `memcap::stats` / `report_line` (`eval --mem-report`); every eval row records the

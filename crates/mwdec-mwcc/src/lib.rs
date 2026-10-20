@@ -44,6 +44,10 @@ pub fn default_work() -> PathBuf {
     std::env::var_os("MWDEC_WORK").map(PathBuf::from).unwrap_or_else(|| mwdec_core::paths::work_dir("mwdec-mwcc"))
 }
 
+/// How mwcc-wasm's error for a run past its memory limit starts ("out of memory: more than N MiB
+/// (MWCC_WASM_MEMORY_MB)").
+const OUT_OF_MEMORY: &str = "out of memory: more than";
+
 /// Typed compiler error.
 #[derive(Debug, Clone)]
 pub enum MwccError {
@@ -56,6 +60,10 @@ pub enum MwccError {
     Timeout { seconds: u64 },
     /// Stopped by the calling thread's cancel flag ([`cancellable`]). Never cached.
     Cancelled,
+    /// An in-process compile needed more memory than mwcc-wasm lets a run have
+    /// (`MWCC_WASM_MEMORY_MB`, 1 GiB by default). Not a crash: no PCH repair, no retry. Never
+    /// cached (the limit decides it, not only the source).
+    OutOfMemory { messages: String },
     /// Spawning / file I/O failure.
     Io(String),
 }
@@ -72,6 +80,7 @@ impl std::fmt::Display for MwccError {
             }
             MwccError::Timeout { seconds } => write!(f, "mwcc timed out after {seconds}s"),
             MwccError::Cancelled => write!(f, "mwcc cancelled"),
+            MwccError::OutOfMemory { messages } => write!(f, "mwcc ran out of memory: {}", messages.trim_end()),
             MwccError::Io(s) => write!(f, "mwcc I/O error: {s}"),
         }
     }
@@ -83,7 +92,7 @@ impl MwccError {
     /// Compiler diagnostics (empty for I/O errors).
     pub fn messages(&self) -> &str {
         match self {
-            MwccError::Compile { messages, .. } | MwccError::Crash { messages, .. } => messages,
+            MwccError::Compile { messages, .. } | MwccError::Crash { messages, .. } | MwccError::OutOfMemory { messages } => messages,
             _ => "",
         }
     }
@@ -390,6 +399,8 @@ impl Mwcc {
                 Ok(r) if r.cancelled => Err(MwccError::Cancelled),
                 Ok(r) if r.timed_out => Err(MwccError::Timeout { seconds: self.timeout.as_secs() }),
                 Ok(r) => Ok((r.exit_code == 0, Some(r.exit_code), r.console, ms)),
+                // (mwcc-wasm's memory limit: its own outcome)
+                Err(e) if format!("{e:#}").contains(OUT_OF_MEMORY) => Err(MwccError::OutOfMemory { messages: format!("{e:#}") }),
                 // (no status: a crash)
                 Err(e) => Ok((false, None, format!("the compiler trapped: {e:#}"), ms)),
             };

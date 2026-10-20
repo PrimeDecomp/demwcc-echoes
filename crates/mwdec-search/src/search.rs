@@ -601,6 +601,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
         Eval::Missing(fs) => initial_error = Some(format!("symbol not defined; candidate defines {fs:?}")),
         Eval::Io(m) => initial_error = Some(format!("io: {m}")),
         Eval::Cancelled => initial_error = Some("cancelled".into()),
+        Eval::OutOfMemory(m) => initial_error = Some(format!("out of memory: {m}")),
     }
     let initial = e0.fitness().cloned();
     let exact0 = initial.as_ref().is_some_and(|f| f.exact);
