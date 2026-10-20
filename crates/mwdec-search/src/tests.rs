@@ -442,8 +442,10 @@ fn unwrap_block_case_guard() {
 
 #[test]
 fn wrap_block_case_body() {
-    let v = outs("void Foo(int s) { switch (s) { case 1: g(); break; } }", "wrap_block");
-    expect(&v, "case 1: { g(); }");
+    let v = outs("void Foo(int s) { switch (s) { case 1: int t = f(); g(t); break; case 2: break; } }", "wrap_block");
+    expect(&v, "case 1: { int t = f(); g(t); }");
+    // a case body that declares nothing is left alone (braces there change nothing)
+    never(&outs("void Foo(int s) { switch (s) { case 1: g(); break; } }", "wrap_block"), "case 1: {");
 }
 
 #[test]

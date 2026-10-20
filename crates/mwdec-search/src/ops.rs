@@ -614,7 +614,9 @@ fn case_lists(m: &M) -> Vec<(usize, Vec<usize>)> {
 fn op_wrap_block(m: &mut M) -> Option<Vec<Edit>> {
     let c = m.cst;
     let mut lists = m.lists(1);
-    lists.extend(case_lists(m));
+    // (a case body only where it declares: braces there scope the declaration, elsewhere they
+    // change nothing)
+    lists.extend(case_lists(m).into_iter().filter(|(_, l)| l.iter().any(|&s| c.kind(s) == "declaration")));
     let (_, l) = lists.get(m.rng.below(lists.len().max(1)))?.clone();
     let i = m.rng.below(l.len());
     let n = 1 + m.rng.below(3.min(l.len() - i));
