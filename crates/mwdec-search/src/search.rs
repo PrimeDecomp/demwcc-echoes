@@ -124,6 +124,18 @@ pub struct Improvement {
     pub penalty: u64,
     pub score: f64,
     pub ops: Vec<&'static str>,
+    /// objdiff's match % of this best (with the scorer's objdiff target).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objdiff_percent: Option<f64>,
+}
+
+/// objdiff's per-function match % of the initial candidate and of the best (with the scorer's
+/// objdiff target): what objdiff and report.json show, where the strict score counts every
+/// register / offset / displacement difference as a whole wrong word.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct ObjdiffPercent {
+    pub initial: Option<f64>,
+    pub best: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,6 +171,7 @@ pub struct SearchResult {
     pub systematic: u64,
     /// Scheduler advice calls (reorder diffs).
     pub advices: u64,
+    pub objdiff_percent: ObjdiffPercent,
 }
 
 #[derive(Clone)]
@@ -367,11 +380,15 @@ impl State {
     }
 }
 
-fn save(cfg: &SearchConfig, best: &Cand, extra: &str) {
+fn save(cfg: &SearchConfig, best: &Cand, extra: &str, objdiff: Option<f64>) {
     if let Some(d) = &cfg.out_dir {
         let _ = std::fs::create_dir_all(d);
         let _ = std::fs::write(d.join("best.cpp"), best.src.as_bytes());
-        let _ = std::fs::write(d.join("best.json"), format!("{}\n", serde_json::to_string(&best.fit).unwrap_or_default()));
+        let mut j = serde_json::to_value(&best.fit).unwrap_or_default();
+        if let (Some(o), Some(p)) = (j.as_object_mut(), objdiff) {
+            o.insert("objdiff_percent".into(), serde_json::json!(p));
+        }
+        let _ = std::fs::write(d.join("best.json"), format!("{}\n", serde_json::to_string(&j).unwrap_or_default()));
         if !extra.is_empty() {
             let _ = std::fs::write(d.join("result.json"), extra);
         }
@@ -589,6 +606,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
     st.compiles += ran as u64;
     let init_src = Arc::new(init.to_string());
     let mut initial_error = None;
+    let objdiff0 = e0.fitness().and_then(|_| scorer.objdiff_percent(init));
     match &e0 {
         Eval::Ok(f) => {
             let c = Cand::new(init_src.clone(), f.clone());
@@ -598,8 +616,8 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
             if systematic {
                 st.add_open(c.clone());
             }
-            save(cfg, &c, "");
-            st.history.push(Improvement { secs: 0.0, evals: 1, penalty: f.penalty, score: f.score, ops: vec![] });
+            save(cfg, &c, "", objdiff0);
+            st.history.push(Improvement { secs: 0.0, evals: 1, penalty: f.penalty, score: f.score, ops: vec![], objdiff_percent: objdiff0 });
         }
         Eval::CompileError(m) => initial_error = Some(format!("compile error: {m}")),
         Eval::Missing(fs) => initial_error = Some(format!("symbol not defined; candidate defines {fs:?}")),
@@ -856,7 +874,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                     let strictly = g.best.as_ref().map_or(true, |b| fit.better_than(&b.fit));
                     if !strictly && g.best.as_ref().is_some_and(|b| cand.better_than(b)) {
                         // Same fitness, simpler source: keep as best without resetting stagnation.
-                        save(cfg, &cand, "");
+                        save(cfg, &cand, "", scorer.objdiff_percent(&cand.src));
                         g.best = Some(cand.clone());
                     }
                     let is_best = strictly;
@@ -867,23 +885,26 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                         g.since_best = 0;
                         let secs = t0.elapsed().as_secs_f64();
                         let evals = g.evals;
+                        let objdiff = scorer.objdiff_percent(&cand.src);
                         g.history.push(Improvement {
                             secs,
                             evals,
                             penalty: fit.penalty,
                             score: fit.score,
                             ops: used.iter().map(|&o| OPS[o].name).collect(),
+                            objdiff_percent: objdiff,
                         });
                         if cfg.verbose {
                             eprintln!(
-                                "[{secs:7.1}s {evals:6} evals] penalty {} score {:.1}{} via {:?}",
+                                "[{secs:7.1}s {evals:6} evals] penalty {} score {:.1}{}{} via {:?}",
                                 fit.penalty,
                                 fit.score,
+                                objdiff.map(|p| format!(" objdiff {p:.2}%")).unwrap_or_default(),
                                 if fit.exact { " EXACT" } else { "" },
                                 used.iter().map(|&o| OPS[o].name).collect::<Vec<_>>()
                             );
                         }
-                        save(cfg, &cand, "");
+                        save(cfg, &cand, "", objdiff);
                         g.best = Some(cand.clone());
                         if fit.exact {
                             stop.store(true, Ordering::Relaxed);
@@ -921,6 +942,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
             }
         }
     }
+    let objdiff_percent = ObjdiffPercent { initial: objdiff0, best: best.as_ref().and_then(|b| scorer.objdiff_percent(&b.src)) };
     let res = SearchResult {
         exact: best.as_ref().is_some_and(|b| b.fit.exact),
         best: best.as_ref().map(|b| b.fit.clone()),
@@ -944,9 +966,10 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
         expansions: g.expansions,
         systematic: g.systematic,
         advices: g.advices,
+        objdiff_percent,
     };
     if let Some(b) = &best {
-        save(cfg, b, &serde_json::to_string_pretty(&res).unwrap_or_default());
+        save(cfg, b, &serde_json::to_string_pretty(&res).unwrap_or_default(), objdiff_percent.best);
     }
     res
 }
@@ -1034,4 +1057,36 @@ pub fn polish(scorer: &Scorer, src: &str, max_evals: usize, seed: u64) -> (Strin
         }
     }
     (cur, accepted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fit(score: f64) -> Fitness {
+        Fitness { exact: false, penalty: 5, score, class: mwdec_mwcc::DiffClass::Code, size_delta: 0, profile: DiffProfile::default() }
+    }
+
+    #[test]
+    fn best_json_carries_the_objdiff_percent() {
+        let dir = std::env::temp_dir().join(format!("mwdec-search-save-{}", std::process::id()));
+        let cfg = SearchConfig { out_dir: Some(dir.clone()), ..Default::default() };
+        let c = Cand::new(Arc::new("void f() {}".into()), fit(90.25));
+        save(&cfg, &c, "", Some(94.69));
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("best.json")).unwrap()).unwrap();
+        assert_eq!(j["score"], 90.25);
+        assert!((j["objdiff_percent"].as_f64().unwrap() - 94.69).abs() < 1e-4);
+        // without an objdiff target the file is the fitness alone
+        save(&cfg, &c, "", None);
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("best.json")).unwrap()).unwrap();
+        assert!(j.get("objdiff_percent").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn result_json_carries_initial_and_best_percent() {
+        let o = ObjdiffPercent { initial: Some(89.7), best: Some(94.69) };
+        let j = serde_json::to_value(o).unwrap();
+        assert!((j["initial"].as_f64().unwrap() - 89.7).abs() < 1e-4 && (j["best"].as_f64().unwrap() - 94.69).abs() < 1e-4);
+    }
 }

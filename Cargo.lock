@@ -1039,6 +1039,7 @@ name = "mwdec-search"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mwcc-compare",
  "mwdec-core",
  "mwdec-mwcc",
  "mwdec-obj",

@@ -26,6 +26,9 @@ pub struct Project {
     pub units: Vec<Unit>,
     /// Compiler version directory per unit name (e.g. "GC/2.7"), from build.ninja.
     pub mw_version: BTreeMap<String, String>,
+    /// Each unit's entry of objdiff.json as it is (its `options` and `symbol_mappings` decide how
+    /// objdiff scores the unit).
+    pub objdiff_entries: HashMap<String, serde_json::Value>,
     inner: mwcc_project::Project,
 }
 
@@ -70,10 +73,13 @@ impl Project {
     /// compile edges: the edge that builds the unit's `base_path`).
     pub fn load(root: &Path) -> Result<Project> {
         let od_path = root.join("objdiff.json");
-        let od: ObjdiffJson = serde_json::from_str(
-            &std::fs::read_to_string(&od_path).with_context(|| format!("reading {}", od_path.display()))?,
-        )
-        .context("parsing objdiff.json")?;
+        let od_text = std::fs::read_to_string(&od_path).with_context(|| format!("reading {}", od_path.display()))?;
+        let od: ObjdiffJson = serde_json::from_str(&od_text).context("parsing objdiff.json")?;
+        let od_raw: serde_json::Value = serde_json::from_str(&od_text).context("parsing objdiff.json")?;
+        let objdiff_entries: HashMap<String, serde_json::Value> = od_raw["units"]
+            .as_array()
+            .map(|us| us.iter().filter_map(|u| Some((u["name"].as_str()?.to_string(), u.clone()))).collect())
+            .unwrap_or_default();
         let inner = mwcc_project::Project::open(root)?;
         let nj_path = root.join("build.ninja");
         // (mwcc-project's `Project::unit` finds a unit's edge by a scan of every edge: one map here)
@@ -96,7 +102,7 @@ impl Project {
             }
             units.push(Unit { name: u.name, source, target_obj: norm(&target), base_obj: base, cflags });
         }
-        Ok(Project { root: root.to_path_buf(), units, mw_version, inner })
+        Ok(Project { root: root.to_path_buf(), units, mw_version, objdiff_entries, inner })
     }
 
     pub fn unit(&self, name: &str) -> Option<&Unit> {

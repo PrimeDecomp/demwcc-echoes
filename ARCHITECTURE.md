@@ -169,7 +169,10 @@ a use).
 `repair_or_variant` (an `--init` source too, without variants: register repair and the
 near-miss pass, an exact one kept) -> `mwdec_search::search` (each candidate: `Scorer::eval` -> `Mwcc::compile_in` ->
 `load_object_bytes` -> `score::fitness` -> `compare_indexed`; on new bests `locate::Locator`,
-`trace::Tracer`, `hints` from mwdec-oracle) -> `best.cpp` / `result.json`.
+`trace::Tracer`, `hints` from mwdec-oracle) -> `best.cpp` / `result.json`. objdiff's match %
+of the initial candidate, each new best and the result: `score::ObjdiffTarget` (mwcc-compare's
+`score::Target`, the unit's target object read once with its objdiff.json entry's options,
+`Project::objdiff_entries`) through `Scorer::objdiff_percent`.
 
 **eval** (`cmd_eval`): `Project::dataset` -> filter by split/size/unit/`--list` -> seeded
 shuffle -> grouped by unit -> `--jobs` worker threads. Per function: `ModuleExterns::get`

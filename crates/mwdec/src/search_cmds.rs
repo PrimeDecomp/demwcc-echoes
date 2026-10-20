@@ -981,7 +981,8 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
     };
     let ti = ObjIndex::new(&ui.target).with_externs(Some(&t_ext));
     let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
-    let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&o_ext), &a.symbol).with_prover(Some(&prover));
+    let objdiff = objdiff_target(&p, u, &a.symbol);
+    let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&o_ext), &a.symbol).with_prover(Some(&prover)).with_objdiff(objdiff.as_ref());
     let init = if a.init.is_none() && emitted_kind(&ui, f).is_none() && !mwdec_emit::instantiate::is_template_instance(&f.name) {
         repair_or_variant(&scorer, choose_draft(&ui, f, &scorer, init), variant_drafts(&ui, f, true), ui.tracer.as_deref())
     } else if a.init.is_some() {
@@ -1029,6 +1030,29 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
     Ok(())
 }
 
+/// objdiff's view of the unit's target for `symbol`, to report objdiff's match % beside the strict
+/// score (`None`, with a warning, when the target or its objdiff.json entry doesn't read).
+fn objdiff_target(p: &Project, u: &Unit, symbol: &str) -> Option<mwdec_search::score::ObjdiffTarget> {
+    let entry = p.objdiff_entries.get(&u.name)?;
+    let bytes = std::fs::read(p.path(&u.target_obj)).ok()?;
+    match mwdec_search::score::ObjdiffTarget::new(&bytes, entry, symbol) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("warning: no objdiff match % for {symbol}: {e}");
+            None
+        }
+    }
+}
+
+/// `objdiff A% -> B%` of a search (`-` where unknown), empty without either.
+fn objdiff_text(o: &mwdec_search::search::ObjdiffPercent) -> String {
+    let pct = |p: Option<f64>| p.map_or("-".to_string(), |p| format!("{p:.2}%"));
+    if o.initial.is_none() && o.best.is_none() {
+        return String::new();
+    }
+    format!("; objdiff {} -> {}", pct(o.initial), pct(o.best))
+}
+
 fn print_result(r: &SearchResult) {
     let fmt = |f: &Option<mwdec_search::Fitness>| match f {
         Some(f) if f.exact => "EXACT".to_string(),
@@ -1036,10 +1060,11 @@ fn print_result(r: &SearchResult) {
         None => "-".into(),
     };
     eprintln!(
-        "// {}: initial {} -> best {}; {} evals ({} compiles, {} compile errors, {} dups) in {:.1}s = {:.1}/s",
+        "// {}: initial {} -> best {}{}; {} evals ({} compiles, {} compile errors, {} dups) in {:.1}s = {:.1}/s",
         if r.exact { "EXACT" } else { "MISMATCH" },
         r.initial_error.clone().unwrap_or_else(|| fmt(&r.initial)),
         fmt(&r.best),
+        objdiff_text(&r.objdiff_percent),
         r.evals,
         r.compiles,
         r.compile_errors,
@@ -1638,3 +1663,16 @@ fn print_table(rows: &[Row]) {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::objdiff_text;
+    use mwdec_search::search::ObjdiffPercent;
+
+    #[test]
+    fn match_line_reports_objdiff_percent() {
+        assert_eq!(objdiff_text(&ObjdiffPercent { initial: Some(89.7), best: Some(94.69) }), "; objdiff 89.70% -> 94.69%");
+        assert_eq!(objdiff_text(&ObjdiffPercent { initial: None, best: Some(100.0) }), "; objdiff - -> 100.00%");
+        assert_eq!(objdiff_text(&ObjdiffPercent::default()), "");
+    }
+}

@@ -406,7 +406,15 @@ Global options: `--root <dir>` (project, read-only; default `$MWDEC_ROOT`), `--w
   [--seed S] [--no-db] [--out dir]`: first draft (or `--init`; a non-exact one gets the draft's
   register repair and near-miss pass first) + search; prints the best source,
   writes `best.cpp`/`result.json`; exit 0 only if exact. `--budget-secs 0` scores the draft
-  without searching.
+  without searching. Besides the strict score (exact-word similarity: any register, stack
+  offset or branch displacement difference makes a whole word wrong) it reports objdiff's
+  per-function match % (`// MISMATCH: initial ... -> best ...; objdiff A% -> B%`, the verbose
+  new-best lines, `objdiff_percent` in `best.json` and, initial and best, in `result.json`):
+  what objdiff and report.json show, scored with the unit's objdiff.json options and the kit's
+  policy (relocation targets compared by the data they refer to, `mwcc_compare::score`).
+  Reporting only: candidates are still ranked by penalty and strict score. The candidate is
+  compiled alone, so a function that references file-static data its candidate source doesn't
+  define can read lower than the same function inside the whole unit.
 - `mwdec eval [--split test|train] [--max-size N] [--limit K] [--jobs J] [--budget-secs N]
   [--list rows.jsonl] [--mem-report] [--exclude-implicit]`: draft + search over a seeded sample of the dataset of one
   split (default test); JSONL rows plus an exact-match table by size bucket and by kind (header

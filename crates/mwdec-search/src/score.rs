@@ -487,6 +487,32 @@ impl Eval {
     }
 }
 
+/// objdiff's view of the target unit, to report objdiff's per-function match % beside the
+/// strict score (reporting only: candidates are ranked by penalty and strict score). The target
+/// object is read once (mwcc-compare's `score::Target`, which also keeps the scores it gave).
+pub struct ObjdiffTarget {
+    target: mwcc_compare::score::Target,
+    options: mwcc_compare::score::ScoreOptions,
+}
+
+impl ObjdiffTarget {
+    /// The unit's target object `bytes`, scored for `symbol` with the options of the unit's
+    /// objdiff.json entry `unit_entry` (its `options` and `symbol_mappings`) and the kit's policy
+    /// (relocation targets compared by the data they refer to).
+    pub fn new(bytes: &[u8], unit_entry: &serde_json::Value, symbol: &str) -> anyhow::Result<ObjdiffTarget> {
+        let options = mwcc_compare::score::ScoreOptions { symbols: Some(vec![symbol.to_string()]), ..mwcc_compare::score::ScoreOptions::from_objdiff_unit(unit_entry) };
+        let target = mwcc_compare::score::Target::new(bytes, mwcc_compare::score::diff_config(&options)?)?;
+        Ok(ObjdiffTarget { target, options })
+    }
+
+    /// objdiff's match % of the function in our object `ours`, to 4 decimals (`None`: not
+    /// paired, or the object doesn't read).
+    pub fn percent(&self, ours: &[u8]) -> Option<f64> {
+        let p = self.target.score(ours, &self.options).ok()?.functions.first()?.match_percent?;
+        Some((p as f64 * 1e4).round() / 1e4)
+    }
+}
+
 /// Everything needed to score candidates for one target function.
 pub struct Scorer<'a> {
     pub mwcc: &'a Mwcc,
@@ -509,6 +535,8 @@ pub struct Scorer<'a> {
     /// exact draft variant) in one run and not in another. Set for draft-time decisions, whose
     /// outcome must not depend on that.
     pub confirm_failures: std::sync::atomic::AtomicBool,
+    /// objdiff's view of the target, for the match % reported beside the strict score.
+    pub objdiff: Option<&'a ObjdiffTarget>,
 }
 
 impl<'a> Scorer<'a> {
@@ -521,7 +549,13 @@ impl<'a> Scorer<'a> {
         ours_ext: Option<&'a ExternIndex>,
         symbol: &str,
     ) -> Scorer<'a> {
-        Scorer { mwcc, ctx, plain, target, tf, ours_ext, symbol: symbol.to_string(), pch_broken: Default::default(), prover: None, confirm_failures: Default::default() }
+        Scorer { mwcc, ctx, plain, target, tf, ours_ext, symbol: symbol.to_string(), pch_broken: Default::default(), prover: None, confirm_failures: Default::default(), objdiff: None }
+    }
+
+    /// Report objdiff's match % through `o` ([`Scorer::objdiff_percent`]).
+    pub fn with_objdiff(mut self, o: Option<&'a ObjdiffTarget>) -> Self {
+        self.objdiff = o;
+        self
     }
 
     /// Resolve target placeholders through `p` (see `mwdec_mwcc::compare`; none with `MWDEC_NO_PLACEHOLDER`).
@@ -694,6 +728,19 @@ impl Scorer<'_> {
             }
         }
         (Eval::Ok(fit), ran)
+    }
+
+    /// objdiff's match % of candidate `src` (a compile, normally answered from the driver's cache
+    /// of the candidate just evaluated). `None` without an objdiff target or an object. For
+    /// reporting (the initial candidate, new bests, the result), not for every evaluation.
+    pub fn objdiff_percent(&self, src: &str) -> Option<f64> {
+        let od = self.objdiff?;
+        let ctx = match self.plain {
+            Some(p) if self.pch_broken.load(std::sync::atomic::Ordering::Relaxed) => p,
+            _ => self.ctx,
+        };
+        let c = self.mwcc.compile_in(ctx, src).ok()?;
+        od.percent(&c.obj)
     }
 
     /// Fitness of the target function in a compiled object (`None`: unreadable or missing).
