@@ -28,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 mwcc-wasm = { path = "../mwcc/crates/mwcc-wasm" }
 mwcc-trace = { path = "../mwcc/crates/mwcc-trace" }
 mwcc-compare = { path = "../mwcc/crates/mwcc-compare" }
+mwcc-project = { path = "../mwcc/crates/mwcc-project" }
 
 [profile.release]
 debug = 1

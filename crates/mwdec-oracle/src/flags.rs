@@ -1,5 +1,5 @@
-//! Compiler flag profiles, copied from the project's build.ninja (the distinct cflags sets).
-//! Include paths are made absolute so compiles can run from any working directory.
+//! Compiler flag profiles: the project's distinct flag sets (its build.ninja's, through
+//! mwcc-project), for compiles that have no unit.
 
 use std::path::Path;
 
@@ -46,67 +46,71 @@ impl Profile {
     }
 }
 
-fn split(s: &str) -> Vec<String> {
-    // Minimal shell-like split honouring double quotes.
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut q = false;
-    let mut any = false;
-    for c in s.chars() {
-        match c {
-            '"' => {
-                q = !q;
-                any = true;
-            }
-            c if c.is_whitespace() && !q => {
-                if any {
-                    out.push(std::mem::take(&mut cur));
-                    any = false;
-                }
-            }
-            c => {
-                cur.push(c);
-                any = true;
+impl Profile {
+    /// The profile of a unit built with `flags` by the compiler `mw_version` (`GC/2.7`).
+    pub fn of(flags: &[String], mw_version: &str) -> Profile {
+        let has = |a: &str, b: &str| flags.windows(2).any(|w| w[0] == a && w[1] == b);
+        match mw_version {
+            "GC/1.2.5n" => Profile::Sdk125,
+            "GC/1.3.2" => Profile::Musyx,
+            _ if flags.iter().any(|f| f == "-lang=c") => Profile::SdkC,
+            _ if has("-sdata", "0") && has("-pool", "off") => Profile::Rel,
+            _ if has("-sdata", "0") => Profile::RelPool,
+            _ => Profile::Game,
+        }
+    }
+}
+
+type Profiles = Vec<(Profile, Vec<String>)>;
+
+/// The flags most of the project's units of each profile build with (mwcc-project's units, in
+/// objdiff.json's order: the first set wins a tie), read once per root.
+fn project_profiles(root: &Path) -> Profiles {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, Profiles>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(v) = cache.lock().unwrap().get(root) {
+        return v.clone();
+    }
+    let mut counts: Vec<(Profile, Vec<String>, usize)> = Vec::new();
+    if let Ok(p) = mwcc_project::Project::open(root) {
+        for name in p.unit_names().unwrap_or_default() {
+            let Ok(u) = p.unit(&name) else { continue };
+            let profile = Profile::of(&u.flags, &u.mw_version.as_deref().unwrap_or("").replace('\\', "/"));
+            match counts.iter_mut().find(|(q, f, _)| *q == profile && *f == u.flags) {
+                Some(c) => c.2 += 1,
+                None => counts.push((profile, u.flags, 1)),
             }
         }
     }
-    if any {
-        out.push(cur);
+    let mut out: Profiles = Vec::new();
+    for (profile, flags, n) in &counts {
+        if out.iter().any(|(q, _)| q == profile) {
+            continue;
+        }
+        let best = counts.iter().filter(|(q, _, _)| q == profile).fold((flags, *n), |b, (_, f, m)| if *m > b.1 { (f, *m) } else { b });
+        out.push((*profile, best.0.clone()));
     }
+    cache.lock().unwrap().insert(root.to_path_buf(), out.clone());
     out
 }
 
-/// Full flag list (without `-c`, input, `-o`) for a profile. `root` = project root (for include paths).
+/// Full flag list (without `-c`, input, `-o`) for a profile: the flags most of the project's units
+/// of that profile build with ([`Profile::of`]), include paths made absolute against `root`
+/// (`root` = project root) so compiles can run from any working directory. Empty if the project
+/// has no unit of the profile.
 pub fn profile_flags(p: Profile, root: &Path) -> Vec<String> {
-    let r = root.to_string_lossy().replace('\\', "/");
-    let inc = format!("-i {r}/include -i {r}/extern/sdk/include -i {r}/libc -i {r}/build/G2ME01/include");
-    let common = "-nodefaults -proc gekko -align powerpc -enum int -fp hardware -Cpp_exceptions off -O4,p \
-        -inline auto -pragma \"cats off\" -pragma \"warn_notinlined off\" -maxerrors 1 -nosyspath -RTTI off \
-        -fp_contract on -str reuse";
-    let defs = "-DBUILD_VERSION=0 -DVERSION=0 -multibyte -DNDEBUG=1";
-    let game = format!(
-        "{common} {inc} {defs} -i {r}/extern/rstl/include -DRSTL_VERSION=10 -use_lmw_stmw on \
-         -str reuse,pool,readonly -gccinc -inline deferred,noauto -common on \
-         -i {r}/extern/musyx/include -DMUSY_TARGET=MUSY_TARGET_DOLPHIN -DMUSY_VERSION_MAJOR=2 -DMUSY_VERSION_MINOR=0 \
-         -DMUSY_VERSION_PATCH=3 -pragma \"inline_max_size(128)\" -pragma \"inline_max_total_size(10000)\""
-    );
-    let s = match p {
-        Profile::Game => format!("{game} -lang=c++"),
-        Profile::Rel => format!("{game} -sdata 0 -sdata2 0 -pool off -lang=c++"),
-        Profile::RelPool => format!("{game} -sdata 0 -sdata2 0 -lang=c++"),
-        Profile::SdkC => format!(
-            "{common} {inc} {defs} -use_lmw_stmw on -str reuse,pool,readonly -gccinc -common off \
-             -inline deferred,auto -DMSL_OLD_FP_CLASSIFY -DMSL_NO_INLINE_SQRT -lang=c"
-        ),
-        Profile::Sdk125 => format!("{common} {inc} {defs} -multibyte -fp_contract off -lang=c"),
-        Profile::Musyx => format!(
-            "-proc gekko -nodefaults -nosyspath -i {r}/include -i {r}/extern/sdk/include -i {r}/libc \
-             -i {r}/extern/musyx/include \
-             -inline auto,depth=4 -O4,p -fp hard -enum int -sym on -Cpp_exceptions off -str reuse,pool,readonly \
-             -fp_contract off -DMUSY_TARGET=MUSY_TARGET_DOLPHIN -DM_PI=3.14159265358979323846 \
-             -DMUSY_VERSION_MAJOR=2 -DMUSY_VERSION_MINOR=0 -DMUSY_VERSION_PATCH=2 -lang=c"
-        ),
-    };
-    split(&s)
+    let flags = project_profiles(root).into_iter().find(|(q, _)| *q == p).map(|(_, f)| f).unwrap_or_default();
+    let mut out = Vec::with_capacity(flags.len());
+    let mut abs_next = false;
+    for a in flags {
+        if abs_next && !Path::new(&a).is_absolute() {
+            out.push(root.join(&a).to_string_lossy().replace('\\', "/"));
+        } else {
+            out.push(a.clone());
+        }
+        abs_next = a == "-i" || a == "-I" || a == "-ir";
+    }
+    out
 }
-

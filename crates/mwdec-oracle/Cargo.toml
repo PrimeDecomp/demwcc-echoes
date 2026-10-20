@@ -14,3 +14,4 @@ serde.workspace = true
 serde_json.workspace = true
 mwcc-wasm.workspace = true
 mwcc-trace.workspace = true
+mwcc-project.workspace = true

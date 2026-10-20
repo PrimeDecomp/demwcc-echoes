@@ -11,14 +11,22 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-pub mod ninja;
 pub mod standalone;
+
+/// The objects at `paths`, loaded in parallel (those that fail to load are skipped).
+fn load_objects(paths: &[PathBuf]) -> Vec<std::sync::Arc<ObjectFile>> {
+    paths
+        .par_iter()
+        .filter_map(|p| Some(std::sync::Arc::new(mwdec_obj::load_object(&p.to_string_lossy()).ok()?)))
+        .collect()
+}
 
 pub struct Project {
     pub root: PathBuf,
     pub units: Vec<Unit>,
     /// Compiler version directory per unit name (e.g. "GC/2.7"), from build.ninja.
     pub mw_version: BTreeMap<String, String>,
+    inner: mwcc_project::Project,
 }
 
 #[derive(Deserialize)]
@@ -58,19 +66,19 @@ pub fn with_source_dir(cflags: &mut Vec<String>, source: &str) {
 }
 
 impl Project {
-    /// Load units from `objdiff.json` and per-unit compiler flags from `build.ninja`.
+    /// Load units from `objdiff.json` and per-unit compiler flags from `build.ninja` (mwcc-project's
+    /// compile edges: the edge that builds the unit's `base_path`).
     pub fn load(root: &Path) -> Result<Project> {
         let od_path = root.join("objdiff.json");
         let od: ObjdiffJson = serde_json::from_str(
             &std::fs::read_to_string(&od_path).with_context(|| format!("reading {}", od_path.display()))?,
         )
         .context("parsing objdiff.json")?;
+        let inner = mwcc_project::Project::open(root)?;
         let nj_path = root.join("build.ninja");
-        let edges = ninja::mwcc_edges(
-            &std::fs::read_to_string(&nj_path).with_context(|| format!("reading {}", nj_path.display()))?,
-        )?;
-        let by_out: HashMap<String, &ninja::MwccEdge> = edges.iter().map(|e| (norm(&e.output), e)).collect();
-        let by_src: HashMap<String, &ninja::MwccEdge> = edges.iter().map(|e| (norm(&e.input), e)).collect();
+        // (mwcc-project's `Project::unit` finds a unit's edge by a scan of every edge: one map here)
+        let rules = mwcc_project::ninja::parse(&std::fs::read_to_string(&nj_path).with_context(|| format!("reading {}", nj_path.display()))?)?;
+        let by_out: HashMap<String, &mwcc_project::ninja::CompileRule> = rules.iter().flat_map(|r| r.outputs.iter().map(move |o| (norm(o), r))).collect();
 
         let mut units = Vec::new();
         let mut mw_version = BTreeMap::new();
@@ -78,20 +86,17 @@ impl Project {
             let Some(target) = u.target_path else { continue };
             let source = u.metadata.and_then(|m| m.source_path).map(|s| norm(&s));
             let base = u.base_path.map(|s| norm(&s));
-            let edge = base
-                .as_ref()
-                .and_then(|b| by_out.get(b))
-                .or_else(|| source.as_ref().and_then(|s| by_src.get(s)));
-            let mut cflags = edge.map(|e| e.cflags.clone()).unwrap_or_default();
+            let edge = base.as_ref().and_then(|b| by_out.get(b)).filter(|r| r.compiler.is_some());
+            let mut cflags: Vec<String> = edge.map(|e| e.flags.iter().filter(|f| !matches!(f.as_str(), "-MMD" | "-MD")).cloned().collect()).unwrap_or_default();
             if let (Some(src), false) = (&source, cflags.is_empty()) {
                 with_source_dir(&mut cflags, src);
             }
-            if let Some(e) = edge {
-                mw_version.insert(u.name.clone(), norm(&e.mw_version));
+            if let Some(v) = edge.and_then(|e| e.mw_version.as_ref()) {
+                mw_version.insert(u.name.clone(), norm(v));
             }
             units.push(Unit { name: u.name, source, target_obj: norm(&target), base_obj: base, cflags });
         }
-        Ok(Project { root: root.to_path_buf(), units, mw_version })
+        Ok(Project { root: root.to_path_buf(), units, mw_version, inner })
     }
 
     pub fn unit(&self, name: &str) -> Option<&Unit> {
@@ -105,7 +110,7 @@ impl Project {
 
     /// Module of a unit: "main" or the REL name (the unit name's first path component).
     pub fn module_of(unit: &str) -> &str {
-        unit.split('/').next().unwrap_or(unit)
+        mwcc_project::Project::module_of(unit)
     }
 
     /// Target objects of every unit in `module` (including auto-generated data splits).
@@ -117,31 +122,13 @@ impl Project {
     /// resolve literals and unnamed functions a target object only references (dtk puts pooled
     /// literals/strings in other splits).
     pub fn load_module_data(&self, module: &str) -> Vec<std::sync::Arc<ObjectFile>> {
-        self.load_objects(&self.module_target_paths(module))
+        self.inner.module_objects(module).map(|m| load_objects(&m.targets)).unwrap_or_default()
     }
 
     /// Objects as the project links them for `module`: our base object where the unit has one,
     /// else the target split. Resolves what *our* objects only reference.
     pub fn load_module_linked(&self, module: &str) -> Vec<std::sync::Arc<ObjectFile>> {
-        let mut paths: Vec<&str> = self
-            .units
-            .iter()
-            .filter(|u| Self::module_of(&u.name) == module)
-            .map(|u| u.base_obj.as_deref().unwrap_or(&u.target_obj))
-            .collect();
-        paths.sort();
-        paths.dedup();
-        self.load_objects(&paths)
-    }
-
-    fn load_objects(&self, paths: &[&str]) -> Vec<std::sync::Arc<ObjectFile>> {
-        paths
-            .par_iter()
-            .filter_map(|rel| {
-                let o = mwdec_obj::load_object(&self.root.join(rel).to_string_lossy()).ok()?;
-                Some(std::sync::Arc::new(o))
-            })
-            .collect()
+        self.inner.module_objects(module).map(|m| load_objects(&m.linked)).unwrap_or_default()
     }
 
     /// Path of the unit's compiler executable (project-root relative), e.g. `build/compilers/GC/2.7/mwcceppc.exe`.

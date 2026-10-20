@@ -20,9 +20,10 @@ to named symbols; lookups
 (`disassemble`, `disasm_word`).
 
 **`mwdec-project`**: project metadata. `Project::load` reads units from objdiff.json and compiler
-flags/versions from build.ninja (`ninja::mwcc_edges`); `Project::dataset` reads report.json;
-`split_of`, `size_bucket`, `is_compiler_generated`; module helpers (`module_of`,
-`load_module_data` for target objects, `load_module_linked` for objects as linked). `harness`
+flags/versions from build.ninja (mwcc-project's `ninja::parse`); `Project::dataset` reads
+report.json; `split_of`, `size_bucket`, `is_compiler_generated`; module helpers (`module_of`,
+`load_module_data` for target objects, `load_module_linked` for objects as linked: mwcc-project's
+`Project::module_of` and `module_objects`). `harness`
 (`context_tu`, `include_lines`) is eval-harness bookkeeping; `standalone::standalone` decides
 whether a function can exist as source at all (header inline, compiler-generated member).
 
@@ -72,7 +73,8 @@ matches and rewrites (`matcher`). `ProbeCache` keeps templates on disk across un
 `session::UnitSession` / `library_for` set up the same inputs for standalone tools.
 
 **`mwdec-oracle`**: compiler experiments and models, independent of the drafter. Library:
-`compile::Compiler` + `flags::profile_flags`, `asm` (annotated listings), `variants` (experiment
+`compile::Compiler` + `flags::profile_flags` (the flags most of the project's units of a kind
+build with, through mwcc-project), `asm` (annotated listings), `variants` (experiment
 files with checked expectations), `webs`, `regalloc`, `hints`, `sched` (mwcc-trace's scheduler
 model), `schedcheck`, `explain`, `iro`, `tracer` (the compiler's decisions: mwcc-trace's `records`
 reads what the module's trace hooks record, in process, into its `Trace`; GC 2.6 / 2.7 only). Binaries: `mwcc-oracle` (asm / trace / inline / iro front
