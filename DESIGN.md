@@ -399,7 +399,8 @@ Global options: `--root <dir>` (project, read-only; default `$MWDEC_ROOT`), `--w
   the unit context with the unit's flags and strictly compare the symbol. Exit 0 exact, 1
   mismatch/missing, 2 compile error, 3 compiler crash.
 - `mwdec match <unit> <symbol> [--budget-secs N] [--init file.cpp] [--max-compiles N] [--workers N]
-  [--seed S] [--no-db] [--out dir]`: first draft (or `--init`) + search; prints the best source,
+  [--seed S] [--no-db] [--out dir]`: first draft (or `--init`; a non-exact one gets the draft's
+  register repair and near-miss pass first) + search; prints the best source,
   writes `best.cpp`/`result.json`; exit 0 only if exact. `--budget-secs 0` scores the draft
   without searching.
 - `mwdec eval [--split test|train] [--max-size N] [--limit K] [--jobs J] [--budget-secs N]

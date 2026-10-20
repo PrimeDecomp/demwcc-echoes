@@ -164,7 +164,8 @@ a use).
 
 **match** (`cmd_match`): `Project::load` -> `externs_for` -> `unit_inputs` -> draft (or
 `--init`) -> `ObjIndex::with_externs` -> `mwdec_search::Scorer::new` -> `choose_draft` ->
-`mwdec_search::search` (each candidate: `Scorer::eval` -> `Mwcc::compile_in` ->
+`repair_or_variant` (an `--init` source too, without variants: register repair and the
+near-miss pass, an exact one kept) -> `mwdec_search::search` (each candidate: `Scorer::eval` -> `Mwcc::compile_in` ->
 `load_object_bytes` -> `score::fitness` -> `compare_indexed`; on new bests `locate::Locator`,
 `trace::Tracer`, `hints` from mwdec-oracle) -> `best.cpp` / `result.json`.
 

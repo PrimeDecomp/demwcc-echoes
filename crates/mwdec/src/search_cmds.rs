@@ -981,6 +981,10 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
     let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&o_ext), &a.symbol).with_prover(Some(&prover));
     let init = if a.init.is_none() && emitted_kind(&ui, f).is_none() && !mwdec_emit::instantiate::is_template_instance(&f.name) {
         repair_or_variant(&scorer, choose_draft(&ui, f, &scorer, init), variant_drafts(&ui, f, true), ui.tracer.as_deref())
+    } else if a.init.is_some() {
+        // a hand-written near miss gets the draft's deterministic repair too (register repair,
+        // then the near-miss pass); an exact one is kept as it is
+        repair_or_variant(&scorer, init, vec![], ui.tracer.as_deref())
     } else {
         init
     };
