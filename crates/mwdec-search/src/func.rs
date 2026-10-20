@@ -334,6 +334,14 @@ pub fn effects(cst: &Cst, info: &FuncInfo, root: usize) -> Effects {
     e
 }
 
+/// Zero-argument `Get*` accessor call (`a.GetX()`, `p->GetFoo()`): taken as a read of its
+/// object, not as a call with side effects.
+pub fn is_getter_call(cst: &Cst, n: usize) -> bool {
+    cst.kind(n) == "call_expression"
+        && cst.child(n, "arguments").is_some_and(|a| cst.named(a).is_empty())
+        && cst.child(n, "function").is_some_and(|f| cst.kind(f) == "field_expression" && cst.child(f, "field").is_some_and(|x| cst.text(x).starts_with("Get")))
+}
+
 /// Builtin arithmetic / pointer types (and the project's common typedefs).
 pub fn is_scalar_type(t: &str) -> bool {
     let t = t.trim();

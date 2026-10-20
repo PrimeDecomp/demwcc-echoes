@@ -85,8 +85,10 @@ end) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,
 **`mwdec-search`**: the compiler-in-the-loop permuter. `search(&Scorer, init, &SearchConfig) ->
 SearchResult` runs a parallel beam / hill-climb over text mutations; `polish` does
 match-preserving clean-ups. `Scorer::eval` compiles (via `Mwcc`) and scores (`Fitness`,
-`DiffProfile`); `cst` (tree-sitter-cpp arena + edits), `ops` / `structural` / `near` (operators),
-`func` (target function and effects model), `locate` (diff localisation), `hints` and `trace`
+`DiffProfile`); `cst` (tree-sitter-cpp arena + edits), `ops` / `structural` / `near` / `forms`
+(operators; `opctx`: the context type facts some need, built from the TypeDb by the CLI and,
+in eval, sent by the draft-server child with its draft), `func` (target function and effects
+model), `locate` (diff localisation), `hints` and `trace`
 (compiler-model driven edits, from mwdec-oracle). Binary: `permuter-bench`.
 
 **`mwdec`**: the CLI (`main.rs`) and orchestration: `search_cmds` (`unit_inputs`, `draft`,

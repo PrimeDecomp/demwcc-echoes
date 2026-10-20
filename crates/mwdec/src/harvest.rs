@@ -589,6 +589,7 @@ fn run_one(us: &UnitSlot, ext: &(ExternIndex, ExternIndex), c: &Cand, a: &Harves
         out_dir: None,
         tracer: ui.tracer.clone(),
         locate: true,
+        op_ctx: ui.op_ctx.clone(),
         ..Default::default()
     };
     let t0 = Instant::now();

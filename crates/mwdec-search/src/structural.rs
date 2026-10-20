@@ -607,8 +607,9 @@ fn negate_text(c: &Cst, e: usize) -> String {
     }
 }
 
-/// Float literal forms (catalog row 16): `x / K` <-> `x * (1/K)` for powers of two, and the
-/// `f` suffix (a double literal adds lfd+frsp and an 8-byte pool entry).
+/// Float literal forms (catalog row 16): `x / K` <-> `x * (1/K)` for powers of two (also
+/// `K * x` and `x /= K` / `x *= K`; `e * 0.5f` <-> `e / 2.0f` was a hand fix in an Echoes near
+/// miss), and the `f` suffix (a double literal adds lfd+frsp and an 8-byte pool entry).
 pub fn op_float_literal(m: &mut M) -> Option<Vec<Edit>> {
     let c = m.cst;
     let mut cands: Vec<(usize, String)> = Vec::new();
@@ -626,8 +627,12 @@ pub fn op_float_literal(m: &mut M) -> Option<Vec<Edit>> {
                     cands.push((n, format!("{t}f")));
                 }
             }
-            "binary_expression" if matches!(c.op(n), Some("/" | "*")) => {
-                let (Some(l), Some(r)) = (c.child(n, "left"), c.child(n, "right")) else { continue };
+            "binary_expression" | "assignment_expression" if matches!(c.op(n), Some("/" | "*" | "/=" | "*=")) => {
+                let (Some(mut l), Some(mut r)) = (c.child(n, "left"), c.child(n, "right")) else { continue };
+                // (a literal factor on the left: `0.5f * x` -> `x / 2.0f`)
+                if c.op(n) == Some("*") && c.kind(l) == "number_literal" && c.kind(r) != "number_literal" {
+                    std::mem::swap(&mut l, &mut r);
+                }
                 if c.kind(r) != "number_literal" {
                     continue;
                 }
@@ -643,7 +648,12 @@ pub fn op_float_literal(m: &mut M) -> Option<Vec<Edit>> {
                     continue;
                 }
                 let lit = format_float(inv, suf);
-                let op = if c.op(n) == Some("/") { "*" } else { "/" };
+                let op = match c.op(n) {
+                    Some("/") => "*",
+                    Some("*") => "/",
+                    Some("/=") => "*=",
+                    _ => "/=",
+                };
                 cands.push((n, format!("{} {op} {lit}", c.text(l))));
             }
             _ => {}

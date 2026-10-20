@@ -70,6 +70,8 @@ pub struct SearchConfig {
     /// Scheduler advice (`mwdec_oracle::advice`) on reorder diffs, at most this many calls per
     /// search (each is a traced compile plus a `-sym on` compile; 0 = off).
     pub max_advice: u64,
+    /// Context type facts for the operators that need them (`crate::opctx`; from the TypeDb).
+    pub op_ctx: Option<Arc<crate::opctx::OpContext>>,
 }
 
 impl Default for SearchConfig {
@@ -98,6 +100,7 @@ impl Default for SearchConfig {
             enum_tries: 12,
             enum_cap: 800,
             max_advice: 0,
+            op_ctx: None,
         }
     }
 }
@@ -521,6 +524,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
         }
     }
     let hints_ref = (!hints.is_empty()).then_some(&hints);
+    let op_ctx = cfg.op_ctx.as_deref();
     let trace_op = ops::op_index("trace_fix").unwrap();
     let ops_ids = (trace_op, ops::op_index("sched_move").unwrap(), ops::op_index("sched_swap").unwrap());
     for (i, o) in OPS.iter().enumerate() {
@@ -709,7 +713,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                         };
                         if let Some((c, w, focus, k)) = job {
                             let te = Instant::now();
-                            let nb = ops::neighbours(&c.src, symbol, &w, hints_ref, focus.as_deref().map(|v| v.as_slice()), cfg.enum_tries, cfg.seed ^ (k + 1).wrapping_mul(0x9e37_79b9), cfg.enum_cap);
+                            let nb = ops::neighbours(&c.src, symbol, &w, hints_ref, op_ctx, focus.as_deref().map(|v| v.as_slice()), cfg.enum_tries, cfg.seed ^ (k + 1).wrapping_mul(0x9e37_79b9), cfg.enum_cap);
                             let hs: Vec<u128> = nb.iter().map(|n| text_hash(&n.src)).collect();
                             let total = nb.len();
                             let mut g = state.lock().unwrap();
@@ -779,11 +783,11 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                         for step in 0..k {
                             let m = match &focus {
                                 Some(fr) if step == 0 && rng.chance(cfg.focus_prob) => {
-                                    let m = ops::mutate_in(&src, symbol, &weights, &mut rng, hints_ref, fr);
+                                    let m = ops::mutate_in(&src, symbol, &weights, &mut rng, hints_ref, op_ctx, fr);
                                     was_focused = m.is_some();
-                                    m.or_else(|| ops::mutate_with(&src, symbol, &weights, &mut rng, hints_ref))
+                                    m.or_else(|| ops::mutate_with(&src, symbol, &weights, &mut rng, hints_ref, op_ctx))
                                 }
-                                _ => ops::mutate_with(&src, symbol, &weights, &mut rng, hints_ref),
+                                _ => ops::mutate_with(&src, symbol, &weights, &mut rng, hints_ref, op_ctx),
                             };
                             if let Some(m) = m {
                                 src = m.src;
@@ -982,7 +986,7 @@ pub fn quick_pass_with(scorer: &Scorer, src: &str, fit: &Fitness, max_compiles: 
     let weights: Vec<f64> = ops::base_weights().iter().zip(OPS).map(|(w, o)| w * affinity_mult(&fit.profile, o.aff)).collect();
     let hints = crate::hints::target_hints(scorer.tf);
     let hints_ref = (!hints.is_empty()).then_some(&hints);
-    let nb = ops::neighbours(src, &scorer.symbol, &weights, hints_ref, None, 12, 1, max_compiles * 3);
+    let nb = ops::neighbours(src, &scorer.symbol, &weights, hints_ref, None, None, 12, 1, max_compiles * 3);
     for n in nb {
         if compiles >= max_compiles {
             break;

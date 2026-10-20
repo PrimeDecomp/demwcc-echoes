@@ -282,8 +282,12 @@ int Counter::Bump(int arg0) {
 ### 9. Candidates, objects and fitness (`mwdec_search`, `mwdec_mwcc`)
 
 The searcher works on source text. `cst::Cst` is an owned arena over a tree-sitter-cpp parse;
-an operator (`ops`, `structural`, `near`) returns byte-range `Edit`s, the text is re-parsed and
-deduplicated by `cst::normalize`. `Scorer::eval` compiles the candidate with
+an operator (`ops`, `structural`, `near`, `forms`) returns byte-range `Edit`s, the text is
+re-parsed and deduplicated by `cst::normalize`. Operators read the source only, plus
+`opctx::OpContext` (enumerators, `bool` members, vector index constants) taken from the
+TypeDb's header types when one was built (without one, the operators needing it have no site).
+Every operator has a name in `ops::OPS` (`--disable-ops` switches it off) and unit tests
+(`mwdec-search/src/tests.rs`: a site, no site, a semantics guard). `Scorer::eval` compiles the candidate with
 `Mwcc::compile_in(&UnitContext, code) -> Compiled { obj, .. }`, loads it with mwdec-obj, and
 scores it: `Fitness { exact, penalty, score, class: DiffClass, size_delta, profile: DiffProfile
 }`, where exactness is the strict comparator and the penalty/profile (register, stack, branch,

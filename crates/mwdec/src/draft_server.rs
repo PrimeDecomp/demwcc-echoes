@@ -42,6 +42,9 @@ pub struct DraftReply {
     /// Tried only when the default pipeline doesn't reach an exact match.
     pub variants: Vec<String>,
     pub error: Option<String>,
+    /// The unit's context type facts the drafts can use (`OpContext::restrict_to`), for the
+    /// search's operators (the parent holds no TypeDb).
+    pub op_ctx: Option<mwdec_search::opctx::OpContext>,
 }
 
 impl DraftReply {
@@ -127,11 +130,15 @@ pub fn draft_local(ui: &UnitInputs, symbol: &str, include_implicit: bool, lift_e
             r.error = Some(e);
         }
     }
+    if let Some(oc) = &ui.op_ctx {
+        let texts: Vec<&str> = r.src.iter().chain(&r.plain).chain(&r.raw).chain(&r.alts).chain(&r.variants).map(String::as_str).collect();
+        r.op_ctx = Some(oc.restrict_to(&texts));
+    }
     r
 }
 
 fn reply_json(r: &DraftReply) -> String {
-    serde_json::json!({"status": r.status, "src": r.src, "plain": r.plain, "implicit": r.implicit, "alts": r.alts, "raw": r.raw, "variants": r.variants, "error": r.error}).to_string()
+    serde_json::json!({"status": r.status, "src": r.src, "plain": r.plain, "implicit": r.implicit, "alts": r.alts, "raw": r.raw, "variants": r.variants, "error": r.error, "op_ctx": r.op_ctx}).to_string()
 }
 
 fn parse_reply(line: &str) -> DraftReply {
@@ -140,7 +147,8 @@ fn parse_reply(line: &str) -> DraftReply {
     };
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     let list = |k: &str| -> Vec<String> { v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default() };
-    DraftReply { status: s("status").unwrap_or_default(), src: s("src"), plain: s("plain"), implicit: s("implicit"), alts: list("alts"), raw: s("raw"), variants: list("variants"), error: s("error") }
+    let op_ctx = v.get("op_ctx").and_then(|x| serde_json::from_value(x.clone()).ok());
+    DraftReply { status: s("status").unwrap_or_default(), src: s("src"), plain: s("plain"), implicit: s("implicit"), alts: list("alts"), raw: s("raw"), variants: list("variants"), error: s("error"), op_ctx }
 }
 
 /// `mwdec draft-server`: one JSON request per stdin line ({"unit","symbol","include_implicit"}),

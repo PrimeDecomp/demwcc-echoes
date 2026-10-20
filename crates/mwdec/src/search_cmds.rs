@@ -137,6 +137,8 @@ pub struct UnitInputs {
     pub tracer: Option<Arc<mwdec_search::trace::Tracer>>,
     /// Header inline templates of the context (mwdec-inline), folded back into calls.
     pub inlines: InlineLibs,
+    /// Context type facts for the search's operators (from `db`).
+    pub op_ctx: Option<Arc<mwdec_search::opctx::OpContext>>,
 }
 
 /// Why no draft exists.
@@ -304,7 +306,8 @@ pub fn unit_inputs_with_context(p: &Project, u: &Unit, cc: &Compilers, module_ob
         lib: std::sync::OnceLock::new(),
     };
     let lift_obj = lit_ext.and_then(|e| with_extern_literals(&target, e));
-    Ok(UnitInputs { target, lift_obj, context, mwcc: m, ctx, plain, db, c_mode, tracer, inlines })
+    let op_ctx = db.as_ref().map(|d| Arc::new(mwdec_search::opctx::OpContext::from_db(d)));
+    Ok(UnitInputs { target, lift_obj, context, mwcc: m, ctx, plain, db, c_mode, tracer, inlines, op_ctx })
 }
 
 /// First draft from the lifter + emitter (implicit functions included: an explicit request).
@@ -725,7 +728,7 @@ pub fn variant_drafts(ui: &UnitInputs, f: &Function, include_implicit: bool) -> 
         let Some(op) = mwdec_search::ops::op_index(name) else { continue };
         let mut w = vec![0.0; mwdec_search::ops::OPS.len()];
         w[op] = 1.0;
-        for n in mwdec_search::ops::neighbours(&base, &f.name, &w, None, None, 8, 1, *k) {
+        for n in mwdec_search::ops::neighbours(&base, &f.name, &w, None, None, None, 8, 1, *k) {
             if n.src != base && !out.contains(&n.src) {
                 out.push(n.src);
             }
@@ -999,6 +1002,7 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
         tracer: ui.tracer.clone(),
         locate: !a.no_locate,
         disabled_ops: split_ops(&a.disable_ops),
+        op_ctx: ui.op_ctx.clone(),
         ..Default::default()
     };
     eprintln!("setup {:.1}s; searching {} (budget {}s) ...", t.elapsed().as_secs_f64(), a.symbol, a.budget_secs);
@@ -1430,6 +1434,7 @@ fn run_one(
         Some(c) => c.draft(&e.unit, &e.symbol, a.include_implicit, false),
         None => crate::draft_server::draft_local(ui, &e.symbol, a.include_implicit, false),
     };
+    let op_ctx = d.op_ctx.clone().map(Arc::new);
     drop(dt);
     let _cs = mwdec_core::prof::span("eval.after_draft");
     row.implicit = d.implicit.clone();
@@ -1507,6 +1512,7 @@ fn run_one(
         tracer: ui.tracer.clone(),
         locate: !a.no_locate,
         disabled_ops: split_ops(&a.disable_ops),
+        op_ctx,
         ..Default::default()
     };
     let r = search(&scorer, &src, &cfg);

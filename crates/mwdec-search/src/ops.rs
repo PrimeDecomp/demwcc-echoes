@@ -7,6 +7,7 @@
 use crate::cst::{apply, normalize, strip_parens, Cst, Edit};
 use crate::func::{self, effects, infer_type, is_int_type, is_loop, is_scalar_type, is_stmt, temp_type, FuncInfo};
 use crate::hints::{HintClass, RegHints};
+use crate::opctx::OpContext;
 use crate::rng::Rng;
 
 /// Operator families, used for diff-guided weighting.
@@ -62,6 +63,8 @@ pub struct M<'a> {
     pub hints: Option<&'a RegHints>,
     /// Restrict variable-centric operators to this local.
     pub focus: Option<String>,
+    /// Facts about the context's types (enums, bool members, vector index constants), if known.
+    pub ctx: Option<&'a OpContext>,
 }
 
 pub const OPS: &[OpDef] = &[
@@ -144,6 +147,24 @@ pub const OPS: &[OpDef] = &[
     OpDef { name: "cmp_select", cat: Cat::Expr, weight: 2.0, aff: C | L, f: crate::near::op_cmp_select },
     OpDef { name: "flag_and", cat: Cat::Control, weight: 2.5, aff: L | C, f: crate::near::op_flag_and },
     OpDef { name: "ctor_copy", cat: Cat::Expr, weight: 4.0, aff: S | R | C, f: crate::near::op_ctor_copy },
+    // Forms of hand fixes of unmatched Echoes near misses that the search could not produce
+    // (crate::forms; agent sessions of 2026-10-19/20, no dataset rows). Untuned modest priors
+    // (to be rescaled by a TRAIN-split eval like the rest).
+    OpDef { name: "call_ternary", cat: Cat::Control, weight: 1.5, aff: L | C, f: crate::forms::op_call_ternary },
+    OpDef { name: "tail_dup", cat: Cat::Control, weight: 1.0, aff: L | C, f: crate::forms::op_tail_dup },
+    OpDef { name: "bool_compare", cat: Cat::Expr, weight: 1.2, aff: C | L, f: crate::forms::op_bool_compare },
+    OpDef { name: "case_insert", cat: Cat::Control, weight: 1.0, aff: L | C, f: crate::forms::op_case_insert },
+    OpDef { name: "case_return", cat: Cat::Control, weight: 1.0, aff: L, f: crate::forms::op_case_return },
+    OpDef { name: "invert_early", cat: Cat::Control, weight: 1.5, aff: L, f: crate::forms::op_invert_early },
+    OpDef { name: "incr_test", cat: Cat::Expr, weight: 1.2, aff: C | S | R, f: crate::forms::op_incr_test },
+    OpDef { name: "static_literal", cat: Cat::Expr, weight: 0.8, aff: C | S | R, f: crate::forms::op_static_literal },
+    OpDef { name: "vec_index", cat: Cat::Expr, weight: 1.2, aff: C | S | R, f: crate::forms::op_vec_index },
+    OpDef { name: "vec_dot", cat: Cat::Expr, weight: 1.0, aff: C | S, f: crate::forms::op_vec_dot },
+    OpDef { name: "vec_copy", cat: Cat::Expr, weight: 1.0, aff: C | S | R, f: crate::forms::op_vec_copy },
+    OpDef { name: "float_view", cat: Cat::Expr, weight: 0.8, aff: C | S | M_, f: crate::forms::op_float_view },
+    // Scope of class-type locals (destructor timing, stack slots): what unwrap_block / wrap_block
+    // do, restricted to blocks declaring such objects, where the scope is codegen.
+    OpDef { name: "object_scope", cat: Cat::Order, weight: 1.5, aff: M_ | S | R, f: crate::forms::op_object_scope },
     // Verified no codegen effect: near-zero weight (cleanup / stepping stones only).
     OpDef { name: "unwrap_block", cat: Cat::Order, weight: 0.46, aff: 0, f: op_unwrap_block },
     OpDef { name: "wrap_block", cat: Cat::Order, weight: 0.1, aff: 0, f: op_wrap_block },
@@ -198,7 +219,7 @@ fn is_primary(k: &str) -> bool {
 }
 
 /// Text of `n`, parenthesized unless it is a primary expression.
-fn ptext(cst: &Cst, n: usize) -> String {
+pub(crate) fn ptext(cst: &Cst, n: usize) -> String {
     if is_primary(cst.kind(n)) {
         cst.text(n).to_string()
     } else {
@@ -207,7 +228,7 @@ fn ptext(cst: &Cst, n: usize) -> String {
 }
 
 /// Parenthesize unary-level operands (`!x`, `-x`, casts, `*p`) only when needed for binary contexts.
-fn ptext_bin(cst: &Cst, n: usize) -> String {
+pub(crate) fn ptext_bin(cst: &Cst, n: usize) -> String {
     match cst.kind(n) {
         k if is_primary(k) => cst.text(n).to_string(),
         "unary_expression" | "pointer_expression" | "cast_expression" | "update_expression" | "sizeof_expression" => {
@@ -217,13 +238,13 @@ fn ptext_bin(cst: &Cst, n: usize) -> String {
     }
 }
 
-fn indent_of(cst: &Cst, n: usize) -> String {
+pub(crate) fn indent_of(cst: &Cst, n: usize) -> String {
     let s = cst.nodes[n].start;
     let line_start = cst.src[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
     cst.src[line_start..s].chars().take_while(|c| c.is_whitespace()).collect()
 }
 
-fn inner_block(cst: &Cst, n: usize) -> String {
+pub(crate) fn inner_block(cst: &Cst, n: usize) -> String {
     if cst.kind(n) == "compound_statement" {
         let t = cst.text(n);
         t[1..t.len() - 1].trim().to_string()
@@ -232,7 +253,7 @@ fn inner_block(cst: &Cst, n: usize) -> String {
     }
 }
 
-fn braced(cst: &Cst, n: usize) -> String {
+pub(crate) fn braced(cst: &Cst, n: usize) -> String {
     if cst.kind(n) == "compound_statement" {
         cst.text(n).to_string()
     } else {
@@ -241,7 +262,7 @@ fn braced(cst: &Cst, n: usize) -> String {
 }
 
 /// Replace statement `s` with several statements, adding braces when `s` is not directly in a block.
-fn replace_stmt_many(cst: &Cst, s: usize, parts: &[String]) -> Edit {
+pub(crate) fn replace_stmt_many(cst: &Cst, s: usize, parts: &[String]) -> Edit {
     let ind = indent_of(cst, s);
     let joined = parts.join(&format!("\n{ind}"));
     let in_block = cst.parent(s).is_some_and(|p| cst.kind(p) == "compound_statement");
@@ -253,12 +274,12 @@ fn replace_stmt_many(cst: &Cst, s: usize, parts: &[String]) -> Edit {
 }
 
 /// Statements of a compound statement (direct children).
-fn stmts_of(cst: &Cst, block: usize) -> Vec<usize> {
+pub(crate) fn stmts_of(cst: &Cst, block: usize) -> Vec<usize> {
     cst.named(block).into_iter().filter(|&c| is_stmt(cst.kind(c))).collect()
 }
 
 /// The expression of an if/while condition clause (no declarations).
-fn cond_expr(cst: &Cst, stmt: usize) -> Option<usize> {
+pub(crate) fn cond_expr(cst: &Cst, stmt: usize) -> Option<usize> {
     let c = cst.child(stmt, "condition")?;
     match cst.kind(c) {
         "condition_clause" => {
@@ -271,7 +292,7 @@ fn cond_expr(cst: &Cst, stmt: usize) -> Option<usize> {
 }
 
 /// Text of the logical negation of expression `e`.
-fn negate(cst: &Cst, e: usize) -> String {
+pub(crate) fn negate(cst: &Cst, e: usize) -> String {
     match cst.kind(e) {
         "parenthesized_expression" => match cst.named(e).first() {
             Some(&i) => negate(cst, i),
@@ -292,7 +313,7 @@ fn negate(cst: &Cst, e: usize) -> String {
     }
 }
 
-fn ends_with_return(cst: &Cst, s: usize) -> bool {
+pub(crate) fn ends_with_return(cst: &Cst, s: usize) -> bool {
     match cst.kind(s) {
         "return_statement" => true,
         "compound_statement" => stmts_of(cst, s).last().is_some_and(|&l| cst.kind(l) == "return_statement"),
@@ -307,16 +328,16 @@ fn has_own_continue(cst: &Cst, lp: usize, body: usize) -> bool {
     })
 }
 
-fn has_kind(cst: &Cst, n: usize, kinds: &[&str]) -> bool {
+pub(crate) fn has_kind(cst: &Cst, n: usize, kinds: &[&str]) -> bool {
     cst.descendants(n).into_iter().any(|d| kinds.contains(&cst.kind(d)))
 }
 
 /// Expression is side-effect free (no calls, assignments, increments).
-fn pure(cst: &Cst, n: usize) -> bool {
+pub(crate) fn pure(cst: &Cst, n: usize) -> bool {
     !has_kind(cst, n, &["call_expression", "assignment_expression", "update_expression", "new_expression", "delete_expression"])
 }
 
-fn names_declared(cst: &Cst, decl: usize) -> Vec<String> {
+pub(crate) fn names_declared(cst: &Cst, decl: usize) -> Vec<String> {
     cst.children_by_field(decl, "declarator").filter_map(|d| func::declarator_name(cst, d).map(|x| x.0)).collect()
 }
 
@@ -342,7 +363,7 @@ pub(crate) fn mentions(cst: &Cst, n: usize, name: &str) -> bool {
 }
 
 impl M<'_> {
-    fn of_kind(&self, kinds: &[&str]) -> Vec<usize> {
+    pub(crate) fn of_kind(&self, kinds: &[&str]) -> Vec<usize> {
         self.nodes.iter().copied().filter(|&n| kinds.contains(&self.cst.kind(n))).collect()
     }
 
@@ -363,7 +384,7 @@ impl M<'_> {
         }
     }
 
-    fn pick<T: Copy>(&mut self, v: &[T]) -> Option<T> {
+    pub(crate) fn pick<T: Copy>(&mut self, v: &[T]) -> Option<T> {
         if v.is_empty() {
             None
         } else {
@@ -580,9 +601,20 @@ fn op_merge_decl(m: &mut M) -> Option<Vec<Edit>> {
     ])
 }
 
+/// Statements of the cases in the body (`case K: a; b;` -> [a, b]).
+fn case_lists(m: &M) -> Vec<(usize, Vec<usize>)> {
+    let c = m.cst;
+    m.of_kind(&["case_statement"])
+        .into_iter()
+        .map(|k| (k, c.named(k).into_iter().filter(|&s| Some(s) != c.child(k, "value") && is_stmt(c.kind(s))).collect::<Vec<_>>()))
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
 fn op_wrap_block(m: &mut M) -> Option<Vec<Edit>> {
     let c = m.cst;
-    let lists = m.lists(1);
+    let mut lists = m.lists(1);
+    lists.extend(case_lists(m));
     let (_, l) = lists.get(m.rng.below(lists.len().max(1)))?.clone();
     let i = m.rng.below(l.len());
     let n = 1 + m.rng.below(3.min(l.len() - i));
@@ -605,12 +637,20 @@ fn op_wrap_block(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit { start: c.nodes[l[i]].start, end: c.nodes[l[j]].end, text: format!("{{\n{ind}{body}\n{ind}}}") }])
 }
 
+/// A block that is a case's statement (`case K: { ... }`) may lose its braces when it declares
+/// nothing or is the last case (a later label would jump past the declarations).
+fn unwrappable_case_block(c: &Cst, b: usize) -> bool {
+    let Some(k) = c.parent(b).filter(|&p| c.kind(p) == "case_statement") else { return false };
+    let last = c.parent(k).and_then(|sw| c.named(sw).into_iter().rfind(|&x| c.kind(x) == "case_statement")) == Some(k);
+    last || !stmts_of(c, b).iter().any(|&s| c.kind(s) == "declaration")
+}
+
 fn op_unwrap_block(m: &mut M) -> Option<Vec<Edit>> {
     let c = m.cst;
     let cands: Vec<usize> = m
         .of_kind(&["compound_statement"])
         .into_iter()
-        .filter(|&b| b != m.info.body && c.parent(b).is_some_and(|p| c.kind(p) == "compound_statement"))
+        .filter(|&b| b != m.info.body && (c.parent(b).is_some_and(|p| c.kind(p) == "compound_statement") || unwrappable_case_block(c, b)))
         .filter(|&b| {
             // Declared names must not clash with other declarations in the function.
             stmts_of(c, b).into_iter().filter(|&s| c.kind(s) == "declaration").flat_map(|s| names_declared(c, s)).all(|n| {
@@ -863,6 +903,28 @@ fn reassigned(c: &Cst, scope: usize, name: &str) -> bool {
     })
 }
 
+/// Reads memory through zero-argument `Get*` accessors only (no other calls, no stores).
+fn getter_pure(c: &Cst, n: usize) -> bool {
+    c.descendants(n).into_iter().all(|d| match c.kind(d) {
+        "assignment_expression" | "update_expression" | "new_expression" | "delete_expression" => false,
+        "call_expression" => func::is_getter_call(c, d),
+        _ => true,
+    })
+}
+
+/// Statement `t` may store to memory: a call other than a `Get*` accessor, `new`/`delete`, an
+/// assignment or increment of anything but a private local, a class-type declaration.
+fn writes_memory(c: &Cst, info: &FuncInfo, t: usize) -> bool {
+    let local = |n: Option<usize>| n.is_some_and(|l| c.kind(strip_parens_node(c, l)) == "identifier" && info.is_private(c.text(strip_parens_node(c, l))));
+    c.descendants(t).into_iter().any(|d| match c.kind(d) {
+        "call_expression" => !func::is_getter_call(c, d),
+        "new_expression" | "delete_expression" => true,
+        "assignment_expression" => !local(c.child(d, "left")),
+        "update_expression" => !local(c.child(d, "argument")),
+        _ => false,
+    }) || (c.kind(t) == "declaration" && c.child(t, "type").is_some_and(|ty| !is_scalar_type(c.text(ty))))
+}
+
 /// Text replacing a use of a local of type `ty` initialized with `val`.
 fn inline_text(c: &Cst, info: &FuncInfo, ty: &str, val: usize) -> String {
     let vt = infer_type(c, info, val);
@@ -875,7 +937,7 @@ fn inline_text(c: &Cst, info: &FuncInfo, ty: &str, val: usize) -> String {
 }
 
 /// Remove a whole statement, including its line when it is alone on it.
-fn remove_stmt(c: &Cst, s: usize) -> Edit {
+pub(crate) fn remove_stmt(c: &Cst, s: usize) -> Edit {
     let mut start = c.nodes[s].start;
     let mut end = c.nodes[s].end;
     let line_start = c.src[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -911,7 +973,10 @@ fn op_inline_var_all(m: &mut M) -> Option<Vec<Edit>> {
                 continue;
             }
             let Some(val) = c.child(ds[0], "value") else { continue };
-            if matches!(c.kind(val), "initializer_list" | "argument_list") || !pure(c, val) {
+            // (zero-argument `Get*` accessors may be read again at each use, as regfix's
+            // inline_getter does, while nothing in between stores or calls anything else)
+            let getter = !pure(c, val) && getter_pure(c, val);
+            if matches!(c.kind(val), "initializer_list" | "argument_list") || !(pure(c, val) || getter) {
                 continue;
             }
             let uses: Vec<usize> = l[i + 1..].iter().flat_map(|&t| uses_of(c, t, &name)).collect();
@@ -928,18 +993,19 @@ fn op_inline_var_all(m: &mut M) -> Option<Vec<Edit>> {
             let ev = m.eff(val);
             let ok = l[i + 1..=j].iter().enumerate().all(|(k, &t)| {
                 let et = m.eff(t);
+                let last = i + 1 + k == j;
                 et.writes.iter().all(|w| !ev.reads.contains(w))
-                    && (!ev.mem_read || i + 1 + k == j || !has_kind(c, t, &["call_expression", "new_expression", "delete_expression"]))
+                    && if getter { last || !writes_memory(c, m.info, t) } else { !ev.mem_read || last || !has_kind(c, t, &["call_expression", "new_expression", "delete_expression"]) }
             });
             if !ok {
                 continue;
             }
-            cands.push((s, val, uses, name));
+            cands.push((s, val, uses, name, getter));
         }
     }
-    let (s, val, uses, name) = cands.get(m.rng.below(cands.len().max(1)))?.clone();
+    let (s, val, uses, name, getter) = cands.get(m.rng.below(cands.len().max(1)))?.clone();
     let ty = m.info.vars.get(&name).map(|v| v.ty.clone()).unwrap_or_default();
-    let repl = inline_text(c, m.info, &ty, val);
+    let repl = if getter { ptext(c, val) } else { inline_text(c, m.info, &ty, val) };
     let mut edits: Vec<Edit> = uses.iter().map(|&u| Edit::replace(c, u, repl.clone())).collect();
     edits.push(remove_stmt(c, s));
     Some(edits)
@@ -1729,7 +1795,7 @@ fn op_do_to_while(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit::replace(c, s, format!("while ({}) {}", c.text(ce), c.text(body)))])
 }
 
-fn ternary_branch(c: &Cst, n: usize) -> String {
+pub(crate) fn ternary_branch(c: &Cst, n: usize) -> String {
     match c.kind(n) {
         "conditional_expression" | "assignment_expression" | "comma_expression" => format!("({})", c.text(n)),
         _ => c.text(n).to_string(),
@@ -1792,7 +1858,7 @@ fn op_ternary_to_if(m: &mut M) -> Option<Vec<Edit>> {
 }
 
 /// Single statement of a branch (unwrapping a one-statement block).
-fn single(c: &Cst, n: usize) -> Option<usize> {
+pub(crate) fn single(c: &Cst, n: usize) -> Option<usize> {
     if c.kind(n) == "compound_statement" {
         let s = stmts_of(c, n);
         (s.len() == 1).then(|| s[0])
@@ -1839,7 +1905,7 @@ fn op_if_to_ternary(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit { start: c.nodes[s].start, end: c.nodes[e].end, text: t }])
 }
 
-fn and_operand(c: &Cst, n: usize) -> String {
+pub(crate) fn and_operand(c: &Cst, n: usize) -> String {
     match c.kind(n) {
         "binary_expression" if c.op(n) == Some("||") => format!("({})", c.text(n)),
         "conditional_expression" | "assignment_expression" | "comma_expression" => format!("({})", c.text(n)),
@@ -1887,7 +1953,7 @@ fn is_zero(t: &str) -> bool {
     matches!(t.trim(), "0" | "NULL" | "nullptr" | "0.0f" | "0.f" | "0.0")
 }
 
-fn in_cond_context(c: &Cst, n: usize) -> bool {
+pub(crate) fn in_cond_context(c: &Cst, n: usize) -> bool {
     let Some(p) = c.parent(n) else { return false };
     match c.kind(p) {
         "condition_clause" => c.nodes[n].field == Some("value"),
@@ -2387,7 +2453,8 @@ fn op_swap_stores(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit::replace(c, a, c.text(b)), Edit::replace(c, b, c.text(a))])
 }
 
-/// Toggle top-level `const` on a by-value scalar parameter (mangling unchanged; catalog row 9a).
+/// Toggle top-level `const` on a by-value parameter, scalar or class (mangling unchanged; catalog
+/// row 9a).
 fn op_param_const(m: &mut M) -> Option<Vec<Edit>> {
     let c = m.cst;
     let fd = c.descendants(c.child(m.info.def, "declarator")?).into_iter().find(|&n| c.kind(n) == "function_declarator")?;
@@ -2397,7 +2464,6 @@ fn op_param_const(m: &mut M) -> Option<Vec<Edit>> {
         .into_iter()
         .filter(|&p| c.kind(p) == "parameter_declaration")
         .filter(|&p| c.child(p, "declarator").is_some_and(|d| c.kind(d) == "identifier"))
-        .filter(|&p| c.child(p, "type").is_some_and(|t| is_scalar_type(c.text(t))))
         .collect();
     let p = m.pick(&cands)?;
     let t = c.text(p);
@@ -2620,6 +2686,7 @@ pub struct Parsed<'s> {
     cst: Cst,
     info: FuncInfo,
     nodes: Vec<usize>,
+    ctx: Option<&'s OpContext>,
 }
 
 impl<'s> Parsed<'s> {
@@ -2628,7 +2695,13 @@ impl<'s> Parsed<'s> {
         let def = func::find_target(&cst, symbol)?;
         let info = FuncInfo::analyze(&cst, def)?;
         let nodes = cst.descendants(info.body);
-        Some(Parsed { src, symbol, cst, info, nodes })
+        Some(Parsed { src, symbol, cst, info, nodes, ctx: None })
+    }
+
+    /// Operators see these context facts.
+    pub fn with_ctx(mut self, ctx: Option<&'s OpContext>) -> Self {
+        self.ctx = ctx;
+        self
     }
 
     pub fn apply(&self, op: usize, rng: &mut Rng, hints: Option<&RegHints>) -> Option<String> {
@@ -2656,7 +2729,7 @@ impl<'s> Parsed<'s> {
                 .collect(),
             _ => self.nodes.clone(),
         };
-        let mut m = M { cst: &self.cst, info: &self.info, rng, nodes, hints, focus: focus.map(String::from) };
+        let mut m = M { cst: &self.cst, info: &self.info, rng, nodes, hints, focus: focus.map(String::from), ctx: self.ctx };
         let edits = (OPS[op].f)(&mut m)?;
         let out = apply(self.src, &edits)?;
         if out == self.src {
@@ -2672,16 +2745,16 @@ impl<'s> Parsed<'s> {
 
 /// Pick an operator by weight and apply it; retries other operators when one has no site.
 pub fn mutate(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng) -> Option<Mutation> {
-    mutate_with(src, symbol, weights, rng, None)
+    mutate_with(src, symbol, weights, rng, None, None)
 }
 
-/// [`mutate`] with target register hints.
-pub fn mutate_with(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>) -> Option<Mutation> {
+/// [`mutate`] with target register hints and context facts.
+pub fn mutate_with(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>, ctx: Option<&OpContext>) -> Option<Mutation> {
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
         return None;
     }
-    let p = Parsed::new(src, symbol)?;
+    let p = Parsed::new(src, symbol)?.with_ctx(ctx);
     for _ in 0..12 {
         let mut x = rng.f64() * total;
         let mut op = 0;
@@ -2701,12 +2774,12 @@ pub fn mutate_with(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hint
 }
 
 /// [`mutate_with`] with sites restricted to byte `ranges` of `src` (see [`Parsed::apply_in`]).
-pub fn mutate_in(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>, ranges: &[(usize, usize)]) -> Option<Mutation> {
+pub fn mutate_in(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>, ctx: Option<&OpContext>, ranges: &[(usize, usize)]) -> Option<Mutation> {
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
         return None;
     }
-    let p = Parsed::new(src, symbol)?;
+    let p = Parsed::new(src, symbol)?.with_ctx(ctx);
     for _ in 0..12 {
         let mut x = rng.f64() * total;
         let mut op = 0;
@@ -2738,8 +2811,9 @@ pub struct Neighbour {
 /// applied with `tries` seeds (operators pick their site and variant at random, so a few seeds
 /// cover the sites of a small function), first restricted to `focus` (the differing statements)
 /// and then anywhere. At most `cap` neighbours, ordered by [`Neighbour::score`].
-pub fn neighbours(src: &str, symbol: &str, weights: &[f64], hints: Option<&RegHints>, focus: Option<&[(usize, usize)]>, tries: usize, seed: u64, cap: usize) -> Vec<Neighbour> {
-    let Some(p) = Parsed::new(src, symbol) else { return vec![] };
+#[allow(clippy::too_many_arguments)]
+pub fn neighbours(src: &str, symbol: &str, weights: &[f64], hints: Option<&RegHints>, ctx: Option<&OpContext>, focus: Option<&[(usize, usize)]>, tries: usize, seed: u64, cap: usize) -> Vec<Neighbour> {
+    let Some(p) = Parsed::new(src, symbol).map(|p| p.with_ctx(ctx)) else { return vec![] };
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut out: Vec<Neighbour> = Vec::new();
     let mut rng = Rng::new(seed);

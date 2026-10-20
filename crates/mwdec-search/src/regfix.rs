@@ -989,11 +989,7 @@ pub fn sink_load_variants(src: &str, symbol: &str) -> Vec<String> {
     let mut out = vec![];
     let idents = |n: usize| -> Vec<String> { c.descendants(n).into_iter().filter(|&d| c.kind(d) == "identifier").map(|d| c.text(d).to_string()).collect() };
     // (zero-argument `Get*` accessors read, they don't write)
-    let getter = |d: usize| {
-        c.kind(d) == "call_expression"
-            && c.child(d, "arguments").is_some_and(|a| c.named(a).is_empty())
-            && c.child(d, "function").is_some_and(|f| c.kind(f) == "field_expression" && c.child(f, "field").is_some_and(|x| c.text(x).starts_with("Get")))
-    };
+    let getter = |d: usize| crate::func::is_getter_call(&c, d);
     let has_call = |n: usize| c.descendants(n).into_iter().any(|d| matches!(c.kind(d), "call_expression" | "new_expression" | "delete_expression") && !getter(d));
     for blk in c.descendants(info.body) {
         if c.kind(blk) != "compound_statement" {
