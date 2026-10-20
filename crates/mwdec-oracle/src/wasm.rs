@@ -7,8 +7,10 @@
 //!   `mwcc_wasm::PersistPool`).
 //! - GC 2.6 and 2.7 always run as their module: [`loaded`] is an error, with the command that builds it, when the
 //!   module is missing or does not load. Other compilers (the SDK's GC 1.x) run as processes.
-//! - The module is found in the mwcc-tools checkout `MWDEC_MWCC_TOOLS`, by default the one this crate was built
-//!   against (next to this checkout).
+//! - The module is found in an mwcc-tools checkout (https://github.com/PrimeDecomp/mwcc-tools) that has it, from a
+//!   release's `mwcc-wasm-GC_2_7-*.zip` unpacked into it or built there: `MWDEC_MWCC_TOOLS`, else `MWCC_ORACLE_ROOT`
+//!   (the kits' name for it), else `mwcc-tools` next to this checkout. The crates come from that repository's Git
+//!   (Cargo.toml), so no checkout is needed to build.
 //! - mwcc-wasm's registry loads it once per process, from the compiled artifact its build writes beside it
 //!   (`mwcc.cache/`), with the version information beside it (`mwcc.version`). Each run instantiates it afresh (the
 //!   compiler keeps its state in globals) on a thread with room for the compiler's recursion.
@@ -33,11 +35,11 @@ pub struct Run {
 /// A module ready to run, with the version information of the executable it stands for.
 pub type Loaded = mwcc_wasm::Loaded;
 
-/// The mwcc-tools checkout the modules are built in.
+/// The mwcc-tools checkout that has the modules.
 fn mwcc_tools() -> PathBuf {
-    match std::env::var_os("MWDEC_MWCC_TOOLS") {
+    match std::env::var_os("MWDEC_MWCC_TOOLS").or_else(|| std::env::var_os("MWCC_ORACLE_ROOT")) {
         Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../mwcc"),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../mwcc-tools"),
     }
 }
 
@@ -62,7 +64,7 @@ pub fn module_for(exe: &Path) -> Option<PathBuf> {
 fn build_hint(exe: &Path) -> String {
     let version = module_version(exe).unwrap_or_default();
     format!(
-        "build it in the mwcc-tools checkout {} with `ninja build/{version}/wasm/mwcc.wasm` (MWDEC_MWCC_TOOLS names another checkout)",
+        "unpack an mwcc-tools release's mwcc-wasm-{version}-*.zip into the mwcc-tools checkout {} (GC_2_7; https://github.com/PrimeDecomp/mwcc-tools/releases), or build it there with `ninja build/{version}/wasm/mwcc.wasm`; MWDEC_MWCC_TOOLS (else MWCC_ORACLE_ROOT) names another checkout",
         mwcc_tools().display()
     )
 }

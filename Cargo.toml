@@ -24,11 +24,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rayon = "1"
 clap = { version = "4", features = ["derive"] }
-# The compiler as WebAssembly (mwcc-tools, checked out next to this repository)
-mwcc-wasm = { path = "../mwcc/crates/mwcc-wasm" }
-mwcc-trace = { path = "../mwcc/crates/mwcc-trace" }
-mwcc-compare = { path = "../mwcc/crates/mwcc-compare" }
-mwcc-project = { path = "../mwcc/crates/mwcc-project" }
+# The compiler as WebAssembly, its trace, comparator and projects: mwcc-tools' crates from its repository (the
+# commit is Cargo.lock's; `cargo update -p mwcc-wasm` moves the four to the branch's head)
+mwcc-wasm = { git = "https://github.com/PrimeDecomp/mwcc-tools", branch = "main" }
+mwcc-trace = { git = "https://github.com/PrimeDecomp/mwcc-tools", branch = "main" }
+mwcc-compare = { git = "https://github.com/PrimeDecomp/mwcc-tools", branch = "main" }
+mwcc-project = { git = "https://github.com/PrimeDecomp/mwcc-tools", branch = "main" }
 
 [profile.release]
 debug = 1

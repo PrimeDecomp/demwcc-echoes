@@ -850,6 +850,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "mwcc-compare"
 version = "0.1.0"
+source = "git+https://github.com/PrimeDecomp/mwcc-tools?branch=main#3c679c0c01135cb1bbb1bbf1528e3863d1317f1b"
 dependencies = [
  "anyhow",
  "objdiff-core",
@@ -864,6 +865,7 @@ dependencies = [
 [[package]]
 name = "mwcc-project"
 version = "0.1.0"
+source = "git+https://github.com/PrimeDecomp/mwcc-tools?branch=main#3c679c0c01135cb1bbb1bbf1528e3863d1317f1b"
 dependencies = [
  "anyhow",
  "mwcc-trace",
@@ -878,6 +880,7 @@ dependencies = [
 [[package]]
 name = "mwcc-trace"
 version = "0.1.0"
+source = "git+https://github.com/PrimeDecomp/mwcc-tools?branch=main#3c679c0c01135cb1bbb1bbf1528e3863d1317f1b"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -889,6 +892,7 @@ dependencies = [
 [[package]]
 name = "mwcc-wasm"
 version = "0.1.0"
+source = "git+https://github.com/PrimeDecomp/mwcc-tools?branch=main#3c679c0c01135cb1bbb1bbf1528e3863d1317f1b"
 dependencies = [
  "encoding_rs",
  "sha2",
