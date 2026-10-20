@@ -99,9 +99,12 @@ fn project_profiles(root: &Path) -> Profiles {
 /// Full flag list (without `-c`, input, `-o`) for a profile: the flags most of the project's units
 /// of that profile build with ([`Profile::of`]), include paths made absolute against `root`
 /// (`root` = project root) so compiles can run from any working directory. Empty if the project
-/// has no unit of the profile.
+/// has no unit of the profile (a warning on stderr).
 pub fn profile_flags(p: Profile, root: &Path) -> Vec<String> {
     let flags = project_profiles(root).into_iter().find(|(q, _)| *q == p).map(|(_, f)| f).unwrap_or_default();
+    if flags.is_empty() {
+        eprintln!("warning: no flags for profile {p:?}: {} has no unit of it (or no objdiff.json / build.ninja)", root.display());
+    }
     let mut out = Vec::with_capacity(flags.len());
     let mut abs_next = false;
     for a in flags {
