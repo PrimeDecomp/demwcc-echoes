@@ -75,7 +75,8 @@ matches and rewrites (`matcher`). `ProbeCache` keeps templates on disk across un
 **`mwdec-oracle`**: compiler experiments and models, independent of the drafter. Library:
 `compile::Compiler` + `flags::profile_flags` (the flags most of the project's units of a kind
 build with, through mwcc-project), `asm` (annotated listings), `variants` (experiment
-files with checked expectations), `webs`, `regalloc`, `hints`, `sched` (mwcc-trace's scheduler
+files with checked expectations), `webs`, `regalloc` (simplify and select are mwcc-trace's
+`allocation::simplify` and `colouring::select`), `hints`, `sched` (mwcc-trace's scheduler
 model), `schedcheck`, `explain`, `iro`, `tracer` (the compiler's decisions: mwcc-trace's `records`
 reads what the module's trace hooks record, in process, into its `Trace`; GC 2.6 / 2.7 only). Binaries: `mwcc-oracle` (asm / trace / inline / iro front
 end) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,

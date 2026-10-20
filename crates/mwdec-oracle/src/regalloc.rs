@@ -9,6 +9,9 @@
 //! instruction is copy-propagated away (CopyPropagation.c: copies never propagate into moves), so
 //! the value lives in the temp: classify it as `Temp`, not `Named`.
 //!
+//! Simplify and select are mwcc-trace's (`allocation::simplify`, `colouring::select`), on the graph
+//! as a traced round; the numbering, spill costs and the inverse solvers below are this model's.
+//!
 //! Colouring: simplify pushes nodes with degree < K in ascending vreg order (repeated passes;
 //! pushing decrements neighbours' degrees); select pops (so normally the HIGHEST vreg is coloured
 //! first) and gives each node the lowest-numbered register in (volatiles + nonvolatiles obtained so
@@ -17,6 +20,9 @@
 //! volatile register, so they only ever get nonvolatiles.
 
 use crate::webs::RegId;
+use mwcc_trace::trace::{Node as TraceNode, Round};
+use mwcc_trace::{allocation, colouring};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -62,7 +68,6 @@ pub fn numbering(nodes: &[Node]) -> Vec<u32> {
 
 pub const GPR_K: u32 = 29; // 32 minus r1, r2, r13 (reserved on EABI)
 pub const FPR_K: u32 = 32;
-const GPR_VOLATILE_COUNT: u32 = 11; // r0, r3..r12
 const FPR_VOLATILE_COUNT: u32 = 14; // f0..f13
 
 /// Colour nodes with the MWCC algorithm. Returns register per node (r14..r31 / f14..f31 as RegId,
@@ -82,68 +87,40 @@ pub fn spill_cost(uses: &[u32], defs: &[(u32, bool)], remat: bool) -> i64 {
     u + d
 }
 
+/// One register class of a graph as mwcc-trace's colouring reads a traced round: node `i` is vreg
+/// `num[i]` with degree `degree0[i]`, its neighbours `adj[i]` (as vregs) and the physical registers
+/// `physical[i]`, its spill cost `costs[i]` (whole numbers; None = all equal), and the registers
+/// select starts with (`mask`).
+fn round_of(adj: &[Vec<usize>], degree0: &[i64], num: &[u32], k: i64, costs: Option<&[f64]>, physical: &[Vec<u32>], mask: u32) -> Round {
+    let nodes = (0..adj.len())
+        .map(|i| {
+            let neighbors = adj[i].iter().map(|&j| num[j]).chain(physical.get(i).into_iter().flatten().copied()).collect();
+            (num[i], TraceNode { pointer: String::new(), degree: degree0[i] as i32, flags: 0, color: -1, neighbors })
+        })
+        .collect();
+    let order = (0..adj.len()).map(|i| (num[i], costs.map_or(1, |c| c[i] as i64))).collect();
+    Round { k: k as i32, nodes, order, mask: Some(mask), ..Default::default() }
+}
+
 /// Simplify order (push order; colouring pops it in reverse) with GC/2.7's exact rules
-/// (`simplifygraph` `0x5088d0`):
+/// (`simplifygraph` `0x5088d0`), mwcc-trace's `allocation::simplify`:
 /// 1. scan nodes in ascending vreg order, push every node with current degree < K (pushing
 ///    decrements its neighbours), repeat the scan until nothing is pushed;
 /// 2. if nodes remain, push the one with the **lowest `cost / current degree`**; ties go to the
 ///    first in the remaining list, which is built by prepending during the ascending scan, so the
 ///    **highest vreg wins ties**; then go back to 1.
-/// `degree0`: initial degree per node; `costs`: spill cost per node (None = all equal).
+///
+/// `degree0`: initial degree per node; `costs`: spill cost per node, whole numbers (None = all equal).
 pub fn simplify_order(adj: &[Vec<usize>], degree0: &[i64], num: &[u32], k: i64, costs: Option<&[f64]>) -> Vec<usize> {
-    let n = adj.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| num[i]);
-    let mut degree = degree0.to_vec();
-    let mut pushed = vec![false; n];
-    let mut stack = Vec::with_capacity(n);
-    loop {
-        let mut progress = true;
-        let mut remaining: Vec<usize> = vec![];
-        while progress {
-            progress = false;
-            remaining.clear();
-            for &i in &order {
-                if pushed[i] {
-                    continue;
-                }
-                if degree[i] < k {
-                    for &j in &adj[i] {
-                        degree[j] -= 1;
-                    }
-                    pushed[i] = true;
-                    stack.push(i);
-                    progress = true;
-                } else {
-                    remaining.push(i);
-                }
-            }
-        }
-        if remaining.is_empty() {
-            break;
-        }
-        // the compiler's list is in descending vreg order (prepended); strict `<` keeps the first
-        let score = |i: usize| -> f64 {
-            let c = costs.map_or(1.0, |c| c[i]);
-            c / degree[i].max(1) as f64
-        };
-        let mut best = *remaining.last().unwrap();
-        for &i in remaining.iter().rev().skip(1) {
-            if score(i) < score(best) {
-                best = i;
-            }
-        }
-        for &j in &adj[best] {
-            degree[j] -= 1;
-        }
-        pushed[best] = true;
-        stack.push(best);
-    }
-    stack
+    let index: HashMap<u32, usize> = num.iter().enumerate().map(|(i, &v)| (v, i)).collect();
+    let round = round_of(adj, degree0, num, k, costs, &[], 0);
+    allocation::simplify(&round, None).pushes.iter().map(|(v, _)| index[v]).collect()
 }
 
 /// [`color`] with per-node spill costs (see [`spill_cost`]): decides which node a blocked simplify
-/// pushes (the K-degree effect order), and so the colouring order of long-lived values.
+/// pushes (the K-degree effect order), and so the colouring order of long-lived values. Simplify
+/// and select are mwcc-trace's (`allocation::simplify`, `colouring::select`); a value live across
+/// a call interferes with every volatile register.
 pub fn color_with_costs(nodes: &[Node], num: &[u32], costs: Option<&[f64]>) -> Vec<Option<RegId>> {
     let mut res = vec![None; nodes.len()];
     for float in [false, true] {
@@ -152,8 +129,9 @@ pub fn color_with_costs(nodes: &[Node], num: &[u32], costs: Option<&[f64]>) -> V
             continue;
         }
         let k = if float { FPR_K } else { GPR_K };
-        let vol_count = if float { FPR_VOLATILE_COUNT } else { GPR_VOLATILE_COUNT };
-        let local: std::collections::HashMap<usize, usize> = ids.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        // (r0, r3..r12; f0..f13)
+        let volatile: Vec<u32> = if float { (0..FPR_VOLATILE_COUNT).collect() } else { [0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].to_vec() };
+        let local: HashMap<usize, usize> = ids.iter().enumerate().map(|(k, &i)| (i, k)).collect();
         let adj: Vec<Vec<usize>> = ids
             .iter()
             .map(|&i| nodes[i].interferes.iter().filter_map(|j| local.get(j).copied()).collect())
@@ -163,39 +141,18 @@ pub fn color_with_costs(nodes: &[Node], num: &[u32], costs: Option<&[f64]>) -> V
             .enumerate()
             .map(|(k, &i)| {
                 let n = &nodes[i];
-                adj[k].len() as i64 + if n.crosses_call { vol_count as i64 } else { 0 } + n.extra_degree as i64
+                adj[k].len() as i64 + if n.crosses_call { volatile.len() as i64 } else { 0 } + n.extra_degree as i64
             })
             .collect();
+        let physical: Vec<Vec<u32>> = ids.iter().map(|&i| if nodes[i].crosses_call { volatile.clone() } else { vec![] }).collect();
         let lnum: Vec<u32> = ids.iter().map(|&i| num[i]).collect();
         let lcost: Option<Vec<f64>> = costs.map(|c| ids.iter().map(|&i| c[i]).collect());
-        let mut stack: Vec<usize> =
-            simplify_order(&adj, &degree0, &lnum, k as i64, lcost.as_deref()).into_iter().map(|x| ids[x]).collect();
-        // select
-        let nonvol: Vec<RegId> = if float { (46u8..=63).rev().collect() } else { (14u8..=31).rev().collect() };
-        let mut obtained: Vec<RegId> = Vec::new();
-        let volatile: Vec<RegId> = if float { (32u8..46).collect() } else { [0u8, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].to_vec() };
-        while let Some(i) = stack.pop() {
-            let n = &nodes[i];
-            let taken: Vec<RegId> = n.interferes.iter().filter_map(|&j| res[j]).collect();
-            let mut cands: Vec<RegId> = Vec::new();
-            if !n.crosses_call {
-                cands.extend(volatile.iter().copied());
-            }
-            cands.extend(obtained.iter().copied());
-            cands.sort();
-            let pick = cands.into_iter().find(|r| !taken.contains(r));
-            res[i] = match pick {
-                Some(r) => Some(r),
-                None => {
-                    if obtained.len() < nonvol.len() {
-                        let r = nonvol[obtained.len()];
-                        obtained.push(r);
-                        Some(r)
-                    } else {
-                        None
-                    }
-                }
-            };
+        let mask = volatile.iter().fold(0u32, |m, r| m | 1 << r);
+        let round = round_of(&adj, &degree0, &lnum, k as i64, lcost.as_deref(), &physical, mask);
+        let order: Vec<u32> = allocation::simplify(&round, None).pushes.iter().rev().map(|(v, _)| *v).collect();
+        let Ok(selected) = colouring::select(&round, &order, &BTreeSet::new(), if float { "FPR" } else { "GPR" }) else { continue };
+        for (k, &i) in ids.iter().enumerate() {
+            res[i] = selected.colour.get(&lnum[k]).map(|&c| c as RegId + if float { 32 } else { 0 });
         }
     }
     res
