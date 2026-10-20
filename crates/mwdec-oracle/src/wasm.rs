@@ -142,6 +142,48 @@ pub fn run_oracle(exe: &Path, args: &[String], directory: &Path, timeout: Durati
     })
 }
 
+/// The files every in-process compile reads in place of the disk's: the headers as a run's start read them
+/// ([`snapshot_reads`]).
+static SNAPSHOT: OnceLock<mwcc_wasm::Overlay> = OnceLock::new();
+
+/// The snapshot [`snapshot_reads`] kept, if any.
+pub fn snapshot() -> Option<&'static mwcc_wasm::Overlay> {
+    SNAPSHOT.get()
+}
+
+/// Run the module of `exe` once with `args`, recording what it reads, and keep the files it consulted for which
+/// `keep` holds as they are now (one it looked for and did not find as absent): every later in-process compile of
+/// the process reads them from memory, so a header edited while a search runs does not change its compiles.
+/// Returns the files kept; `None` when `exe` has no module (a process compiler reads the disk) or a snapshot is
+/// already kept.
+pub fn snapshot_reads(exe: &Path, args: &[String], directory: &Path, timeout: Duration, keep: &dyn Fn(&Path) -> bool) -> Result<Option<usize>> {
+    if SNAPSHOT.get().is_some() {
+        return Ok(None);
+    }
+    let Some(loaded) = loaded(exe)? else { return Ok(None) };
+    let environment: Vec<(String, String)> = std::env::vars().collect();
+    let outcome = execute_with(&loaded, exe, args, directory, timeout, &environment, false, None, true)?;
+    let directory = std::path::absolute(directory).unwrap_or_else(|_| directory.to_path_buf());
+    let mut overlay = mwcc_wasm::Overlay::new();
+    let mut kept = 0;
+    for consulted in &outcome.consulted {
+        let mwcc_wasm::Consulted::Path(path) = consulted else { continue };
+        let path = if path.is_absolute() { path.clone() } else { directory.join(path) };
+        if !keep(&path) || path.is_dir() {
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                overlay.insert(&path, bytes);
+                kept += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => overlay.insert_absent(&path),
+            Err(_) => {}
+        }
+    }
+    Ok(SNAPSHOT.set(overlay).is_ok().then_some(kept))
+}
+
 fn execute(
     loaded: &Loaded,
     exe: &Path,
@@ -151,6 +193,21 @@ fn execute(
     environment: &[(String, String)],
     trace: bool,
     cancel: Option<Arc<AtomicBool>>,
+) -> Result<mwcc_wasm::Outcome> {
+    execute_with(loaded, exe, args, directory, timeout, environment, trace, cancel, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_with(
+    loaded: &Loaded,
+    exe: &Path,
+    args: &[String],
+    directory: &Path,
+    timeout: Duration,
+    environment: &[(String, String)],
+    trace: bool,
+    cancel: Option<Arc<AtomicBool>>,
+    record_reads: bool,
 ) -> Result<mwcc_wasm::Outcome> {
     let program = std::path::absolute(exe).unwrap_or_else(|_| exe.to_path_buf()).to_string_lossy().into_owned();
     let directory = std::path::absolute(directory).unwrap_or_else(|_| directory.to_path_buf());
@@ -167,9 +224,9 @@ fn execute(
                 // (the registry's run polls the closure below instead)
                 cancel: None,
                 trace,
-                overlay: None,
+                overlay: SNAPSHOT.get(),
                 transcode_sjis: false,
-                record_reads: false,
+                record_reads,
             },
             &|| cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)),
         )

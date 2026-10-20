@@ -901,6 +901,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mwcc-compare",
  "mwdec-core",
  "mwdec-ctx",
  "mwdec-emit",
@@ -911,7 +912,9 @@ dependencies = [
  "mwdec-project",
  "mwdec-search",
  "rayon",
+ "serde",
  "serde_json",
+ "similar",
 ]
 
 [[package]]

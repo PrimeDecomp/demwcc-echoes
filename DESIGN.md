@@ -399,9 +399,19 @@ Global options: `--root <dir>` (project, read-only; default `$MWDEC_ROOT`), `--w
   the unit context with the unit's flags and strictly compare the symbol. Exit 0 exact, 1
   mismatch/missing, 2 compile error, 3 compiler crash.
 - `mwdec match <unit> <symbol> [--budget-secs N] [--init file.cpp] [--max-compiles N] [--workers N]
-  [--seed S] [--no-db] [--out dir]`: first draft (or `--init`) + search; prints the best source,
-  writes `best.cpp`/`result.json`; exit 0 only if exact. `--budget-secs 0` scores the draft
-  without searching.
+  [--seed S] [--no-db] [--out dir] [--deadline-secs N] [--no-ablate]`: first draft (or `--init`) +
+  search; prints the best source, writes `best.cpp`/`result.json`; exit 0 only if exact. `--budget-secs 0`
+  scores the draft without searching.
+  - The headers the unit's context reads are kept as they are at the start (in-process compiles read them from
+    memory, `Mwcc::snapshot_headers`): a header edited while the run searches does not change its compiles.
+  - A mismatch's best is ablated: each edit from the starting point (line hunks, then words) is reverted when the
+    fitness does not need it. `ablated.cpp` holds the edits that carry the gain, `result.json`'s `ablation` lists
+    them, and the printed source is it (`--no-ablate`: the search's best as it is).
+  - `result.json`'s `objdiff_match_percent` is objdiff's match of the function in the printed source (report.json's
+    `fuzzy_match_percent` for it), so the best needs no re-scoring.
+  - `--deadline-secs` (default: the budget plus half of it, at least 60s more) is the whole run's hard limit, setup
+    and post-passes included: past it the process ends with status 3, `best.cpp` as last saved, and the job object
+    ends its compilers.
 - `mwdec eval [--split test|train] [--max-size N] [--limit K] [--jobs J] [--budget-secs N]
   [--list rows.jsonl] [--mem-report] [--exclude-implicit]`: draft + search over a seeded sample of the dataset of one
   split (default test); JSONL rows plus an exact-match table by size bucket and by kind (header
