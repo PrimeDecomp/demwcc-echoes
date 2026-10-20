@@ -404,7 +404,8 @@ Global options: `--root <dir>` (project, read-only; default `$MWDEC_ROOT`), `--w
   mismatch/missing, 2 compile error, 3 compiler crash.
 - `mwdec match <unit> <symbol> [--budget-secs N] [--init file.cpp] [--max-compiles N] [--workers N]
   [--seed S] [--no-db] [--out dir]`: first draft (or `--init`; a non-exact one gets the draft's
-  register repair and near-miss pass first) + search; prints the best source,
+  register repair and near-miss pass first; the operators' `OpContext` comes from the context's
+  base TypeDb, cached, without the drafter's vtable and instance passes; `--no-db` drops it) + search; prints the best source,
   writes `best.cpp`/`result.json`; exit 0 only if exact. `--budget-secs 0` scores the draft
   without searching. Besides the strict score (exact-word similarity: any register, stack
   offset or branch displacement difference makes a whole word wrong) it reports objdiff's

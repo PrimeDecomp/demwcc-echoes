@@ -937,6 +937,24 @@ impl<'p> ModuleExterns<'p> {
     }
 }
 
+/// The operator context of a `--init` source: the context's base TypeDb (headers only, cached on
+/// disk, without the drafter's vtable and instance passes, which `--init` doesn't need) restricted
+/// to the names the source uses. The unit's own `db` stays unset, so nothing else changes.
+fn init_op_ctx(ui: &UnitInputs, cflags: &[String], init: &str) -> Option<Arc<mwdec_search::opctx::OpContext>> {
+    let _p = mwdec_core::prof::span("unit.typedb");
+    match mwdec_ctx::build_typedb(&ui.context, cflags, &mwdec_ctx::default_work_dir()) {
+        Ok(db) => Some(Arc::new(op_ctx_for(&db, init))),
+        Err(e) => {
+            eprintln!("warning: typedb failed ({e}); operators that need the context have no site");
+            None
+        }
+    }
+}
+
+fn op_ctx_for(db: &mwdec_core::TypeDb, src: &str) -> mwdec_search::opctx::OpContext {
+    mwdec_search::opctx::OpContext::from_db(db).restrict_to(&[src])
+}
+
 pub struct MatchArgs {
     pub unit: String,
     pub symbol: String,
@@ -1003,7 +1021,7 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
         tracer: ui.tracer.clone(),
         locate: !a.no_locate,
         disabled_ops: split_ops(&a.disable_ops),
-        op_ctx: ui.op_ctx.clone(),
+        op_ctx: if a.init.is_some() && !a.no_db { init_op_ctx(&ui, &u.cflags, &init) } else { ui.op_ctx.clone() },
         ..Default::default()
     };
     eprintln!("setup {:.1}s; searching {} (budget {}s) ...", t.elapsed().as_secs_f64(), a.symbol, a.budget_secs);
@@ -1674,5 +1692,23 @@ mod tests {
         assert_eq!(objdiff_text(&ObjdiffPercent { initial: Some(89.7), best: Some(94.69) }), "; objdiff 89.70% -> 94.69%");
         assert_eq!(objdiff_text(&ObjdiffPercent { initial: None, best: Some(100.0) }), "; objdiff - -> 100.00%");
         assert_eq!(objdiff_text(&ObjdiffPercent::default()), "");
+    }
+
+    #[test]
+    fn init_op_ctx_keeps_the_facts_the_source_uses() {
+        use mwdec_core::{Class, Enum, Field, Type, TypeDb};
+        let mut db = TypeDb::default();
+        for (e, v) in [("EState", "kS_Idle"), ("EOther", "kO_Unused")] {
+            db.enums.insert(e.into(), Enum { name: e.into(), size: 4, values: vec![(v.into(), 0)] });
+        }
+        let field = |n: &str| Field { name: n.into(), offset: 0, ty: Type::Bool, bitfield: None, size: 1, access: Default::default() };
+        db.classes.insert("CThing".into(), Class { name: "CThing".into(), size: 4, fields: vec![field("mActive"), field("mHidden")], ..Default::default() });
+        let c = super::op_ctx_for(&db, "void CThing::Update() { if (mActive && x == kS_Idle) {} }");
+        assert_eq!(c.enums.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["EState"]);
+        assert_eq!(c.bool_members.iter().map(String::as_str).collect::<Vec<_>>(), ["mActive"]);
+        assert!(c.vec3.contains_key("CThing"));
+        // a source that names nothing of the context gets no facts
+        let none = super::op_ctx_for(&db, "int f(int a) { return a; }");
+        assert!(none.enums.is_empty() && none.bool_members.is_empty() && none.vec3.is_empty());
     }
 }
