@@ -39,6 +39,21 @@ pub struct DatasetEntry {
     pub split: String,
 }
 
+/// A unit's split ([`DatasetEntry::split`]): FNV-1a 32 of its name, `% 10 < 7` => "train",
+/// else "test".
+pub fn split_of(unit: &str) -> &'static str {
+    let mut h: u32 = 0x811c9dc5;
+    for b in unit.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x01000193);
+    }
+    if h % 10 < 7 {
+        "train"
+    } else {
+        "test"
+    }
+}
+
 // ---------------------------------------------------------------- types
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

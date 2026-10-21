@@ -860,7 +860,7 @@ pub fn polish_exact(ui: &UnitInputs, scorer: &Scorer, src: &str) -> String {
         return src.to_string();
     }
     // a rewrite bug must never cost the exact result
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mwdec_emit::tidy::polish(src, ui.db.as_ref(), 100, &mut |s: &str| scorer.eval(s).0.fitness().map_or(false, |f| f.exact)).0)).unwrap_or_else(|_| src.to_string())
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mwdec_emit::tidy::polish(src, ui.db.as_ref(), 100, &mut |s: &str| scorer.eval(s).0.fitness().is_some_and(|f| f.exact)).0)).unwrap_or_else(|_| src.to_string())
 }
 
 /// A function whose symbol is not a mangled C++ name (a placeholder like `fn_<module>_<addr>`)
@@ -890,6 +890,13 @@ pub fn extern_c_definition(body: &str, symbol: &str, c_mode: bool) -> String {
 pub fn externs_for(p: &Project, unit: &str) -> (ExternIndex, ExternIndex) {
     let mut m = module_externs(p, std::iter::once(unit));
     m.remove(Project::module_of(unit)).unwrap_or_else(|| (ExternIndex::new(vec![]), ExternIndex::new(vec![])))
+}
+
+/// The target side of [`externs_for`] alone (the linked objects are not loaded).
+pub fn target_externs_for(p: &Project, unit: &str) -> ExternIndex {
+    let m = Project::module_of(unit);
+    let main = Arc::new(ExternIndex::new(p.load_module_data("main")));
+    ExternIndex::layered(main, if m == "main" { vec![] } else { p.load_module_data(m) })
 }
 
 type ExtPair = Arc<(ExternIndex, ExternIndex)>;
@@ -1260,8 +1267,8 @@ pub fn cmd_eval(root: &Path, work: &Path, a: EvalArgs) -> Result<()> {
     let mut ds: Vec<DatasetEntry> = p
         .dataset()?
         .into_iter()
-        .filter(|e| e.split == a.split && a.max_size.map_or(true, |m| e.size <= m) && e.size >= a.min_size)
-        .filter(|e| a.unit.as_deref().map_or(true, |u| e.unit.contains(u)))
+        .filter(|e| e.split == a.split && a.max_size.is_none_or(|m| e.size <= m) && e.size >= a.min_size)
+        .filter(|e| a.unit.as_deref().is_none_or(|u| e.unit.contains(u)))
         .collect();
     if let Some(l) = &a.list {
         let text = std::fs::read_to_string(l).with_context(|| format!("reading {}", l.display()))?;
@@ -1370,7 +1377,7 @@ pub fn cmd_eval(root: &Path, work: &Path, a: EvalArgs) -> Result<()> {
                         let _ = writeln!(f, "{}", row.json());
                         let _ = f.flush();
                         drop(f);
-                        if (i + 1) % 200 == 0 {
+                        if (i + 1).is_multiple_of(200) {
                             eprintln!("[{:>4}/{}] drafts", i + 1, ds.len());
                         }
                         continue;

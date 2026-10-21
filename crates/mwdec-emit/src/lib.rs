@@ -119,7 +119,7 @@ pub fn with_c_mode<R>(c_mode: bool, db: Option<&TypeDb>, f: impl FnOnce() -> R) 
     types::C_MODE.with(|c| c.set(c_mode));
     types::C_BOOL.with(|c| {
         let uses_bool = |t: &Type| matches!(t.unqualified(), Type::Bool);
-        c.set(c_mode && db.map_or(false, |db| db.decls.values().flatten().any(|d| uses_bool(&d.ret) || d.params.iter().any(|p| uses_bool(&p.ty)))));
+        c.set(c_mode && db.is_some_and(|db| db.decls.values().flatten().any(|d| uses_bool(&d.ret) || d.params.iter().any(|p| uses_bool(&p.ty)))));
     });
     f()
 }
@@ -220,7 +220,7 @@ fn emit_draft(ir: &IrFunction, db: Option<&TypeDb>, opts: &EmitOptions) -> Emitt
     };
     types::C_BOOL.with(|c| {
         let uses_bool = |t: &Type| matches!(t.unqualified(), Type::Bool);
-        c.set(opts.c_mode && db.map_or(false, |db| db.decls.values().flatten().any(|d| uses_bool(&d.ret) || d.params.iter().any(|p| uses_bool(&p.ty)))));
+        c.set(opts.c_mode && db.is_some_and(|db| db.decls.values().flatten().any(|d| uses_bool(&d.ret) || d.params.iter().any(|p| uses_bool(&p.ty)))));
     });
     types::C_TAGS.with(|t| {
         let mut t = t.borrow_mut();
@@ -313,10 +313,6 @@ pub(crate) fn strip_unnamed_ns(n: &str) -> String {
 /// `v->T(args)` constructor call statement on the object `v` points at.
 fn is_ctor_on(s: &Stmt, v: VarId) -> bool {
     matches!(s, Stmt::Expr(Expr::Call { callee: Callee::Method { sig: sg, this, .. }, .. }) if sig::is_ctor(sg) && matches!(&**this, Expr::Var(x) if *x == v))
-}
-
-fn stmt_mentions(s: &Stmt, v: VarId) -> bool {
-    mwdec_lift::idioms::stmt_mentions(s, v)
 }
 
 fn prec_of(e: &Expr) -> u8 {
@@ -450,7 +446,7 @@ impl<'a> Em<'a> {
             };
             ps.push(p);
         }
-        if ir.decl_params.last().map_or(false, |s| s == "...") {
+        if ir.decl_params.last().is_some_and(|s| s == "...") {
             ps.push("...".into());
         }
         head.push_str(&ps.join(", "));
@@ -549,7 +545,7 @@ impl<'a> Em<'a> {
         if let Some(v) = self.sret_local {
             // constructed by a top-level constructor call before any other use: declare it there
             let ctor_at = ir.body.iter().position(|s| is_ctor_on(s, v));
-            let first_use = ir.body.iter().position(|s| stmt_mentions(s, v));
+            let first_use = ir.body.iter().position(|s| Stmt::uses_var(s, v));
             // (a base class's constructor of an expanded inline constructor builds only part
             // of the returned object: not its declaration)
             // (typedefs resolved: a typedef of a container is the container its constructor builds)
@@ -671,7 +667,7 @@ impl<'a> Em<'a> {
         // (a class of the anonymous namespace is named without it)
         let cls = if cls.starts_with("@unnamed@") { strip_unnamed_ns(&cls) } else { cls };
         // (a lower-case scope may be a namespace, `std`: not when it has variables)
-        let ns_vars = ir.globals.iter().any(|g| sig::demangle(&g.symbol).map_or(false, |d| sig::split_scope(&d).0 == Some(cls.as_str())));
+        let ns_vars = ir.globals.iter().any(|g| sig::demangle(&g.symbol).is_some_and(|d| sig::split_scope(&d).0 == Some(cls.as_str())));
         // (a class its enclosing class only declares can be defined out of line)
         let declared_nested = cls.contains("::") && sig::find_class(db, &cls).is_some_and(|c| c.is_declaration) && sig::split_scope(&cls).0.is_some_and(|sc| sig::find_class(db, sc).is_some_and(|p| !p.is_declaration));
         // an instance of a class template the context lacks: the template is synthesized
@@ -680,7 +676,7 @@ impl<'a> Em<'a> {
             Some((b, k)) => (b, k),
             None => (cls, vec![]),
         };
-        if (cls.chars().next().map_or(true, |c| c.is_ascii_lowercase()) && ns_vars) || (cls.contains("::") && !declared_nested) || cls.contains('<') || cls.contains('@') || sig::find_class(db, &cls).is_some_and(|c| !c.is_declaration || (cls.contains("::") && !declared_nested)) || db.namespaces.contains(&cls) || db.templates.contains_key(&cls) {
+        if (cls.chars().next().is_none_or(|c| c.is_ascii_lowercase()) && ns_vars) || (cls.contains("::") && !declared_nested) || cls.contains('<') || cls.contains('@') || sig::find_class(db, &cls).is_some_and(|c| !c.is_declaration || (cls.contains("::") && !declared_nested)) || db.namespaces.contains(&cls) || db.templates.contains_key(&cls) {
             return;
         }
         let mut base: Option<String> = None;
@@ -722,7 +718,7 @@ impl<'a> Em<'a> {
         if ps.is_empty() {
             ps = ir.params.iter().map(|&v| type_str(&ir.vars[v].ty)).collect();
         }
-        if ir.decl_params.last().map_or(false, |s| s == "...") {
+        if ir.decl_params.last().is_some_and(|s| s == "...") {
             ps.push("...".into());
         }
         let is_cdtor = sig::is_ctor(&ir.sig) || sig::is_dtor(&ir.sig);
@@ -775,7 +771,7 @@ impl<'a> Em<'a> {
         if last.len() <= 1 || last.starts_with('_') || last.starts_with("__") || is_c_keyword(last) {
             return false;
         }
-        if sig::find_class(db, n).map_or(false, |c| !c.is_declaration) || db.typedefs.contains_key(n) || db.enums.contains_key(n) || db.templates.contains_key(n) || db.namespaces.contains(n) {
+        if sig::find_class(db, n).is_some_and(|c| !c.is_declaration) || db.typedefs.contains_key(n) || db.enums.contains_key(n) || db.templates.contains_key(n) || db.namespaces.contains(n) {
             return false;
         }
         // nested in a class the context defines: can't be added from outside, unless that
@@ -965,7 +961,7 @@ impl<'a> Em<'a> {
                     e = x;
                 }
                 let t = ty_of(e, vars);
-                pointee(&t).and_then(|p| named(strip_cv(p)).map(|n| strip_unnamed_ns(n))).filter(|n| wanted.contains(n))
+                pointee(&t).and_then(|p| named(strip_cv(p)).map(strip_unnamed_ns)).filter(|n| wanted.contains(n))
             };
             let mut found: Vec<(String, i32, Type)> = vec![];
             let mut steps: Vec<(String, u32)> = vec![];
@@ -1008,7 +1004,7 @@ impl<'a> Em<'a> {
                 _ => {}
             });
             for st in &ir.body {
-                fn steps_in(b: &[Stmt], vars: &[Var], out: &mut Vec<(VarId, i64)>) {
+                fn steps_in(b: &[Stmt], out: &mut Vec<(VarId, i64)>) {
                     for s in b {
                         match s {
                             Stmt::Assign { dst: Expr::Var(v), src } => {
@@ -1029,21 +1025,21 @@ impl<'a> Em<'a> {
                                 }
                             }
                             Stmt::If { then, els, .. } => {
-                                steps_in(then, vars, out);
-                                steps_in(els, vars, out);
+                                steps_in(then, out);
+                                steps_in(els, out);
                             }
-                            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => steps_in(body, vars, out),
+                            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => steps_in(body, out),
                             Stmt::For { init, step, body, .. } => {
-                                steps_in(init, vars, out);
-                                steps_in(step, vars, out);
-                                steps_in(body, vars, out);
+                                steps_in(init, out);
+                                steps_in(step, out);
+                                steps_in(body, out);
                             }
                             _ => {}
                         }
                     }
                 }
                 let mut out = vec![];
-                steps_in(std::slice::from_ref(st), vars, &mut out);
+                steps_in(std::slice::from_ref(st), &mut out);
                 for (v, k) in out {
                     if let Some(c) = class_of(&Expr::Var(v)).filter(|_| k > 0) {
                         steps.push((c, k as u32));
@@ -1063,7 +1059,7 @@ impl<'a> Em<'a> {
         }
         // nested names (`A::B` with `A` synthesized) live inside their parent
         let all: Vec<String> = wanted.iter().cloned().collect();
-        let is_nested = |n: &str| sig::split_scope(n).0.map_or(false, |sc| all.iter().any(|a| a == sc));
+        let is_nested = |n: &str| sig::split_scope(n).0.is_some_and(|sc| all.iter().any(|a| a == sc));
         for n in &all {
             self.synth.entry(n.clone()).or_default();
         }
@@ -1732,7 +1728,7 @@ impl<'a> Em<'a> {
     fn stmt(&mut self, s: &Stmt, depth: usize) {
         let ind = self.ind(depth);
         match s {
-            Stmt::Expr(e) if self.sret_ctor_decl && self.sret_local.map_or(false, |v| is_ctor_on(s, v)) => {
+            Stmt::Expr(e) if self.sret_ctor_decl && self.sret_local.is_some_and(|v| is_ctor_on(s, v)) => {
                 self.sret_ctor_decl = false;
                 if let Expr::Call { callee: Callee::Method { sig: sg, .. }, args, .. } = e {
                     let t = Type::Named(sg.this_class.clone().unwrap_or_default());
@@ -1848,7 +1844,7 @@ impl<'a> Em<'a> {
             Stmt::Assign { dst: Expr::Var(v), src: src @ Expr::Call { ret, callee: Callee::Virtual { sig: vs, .. }, .. } }
                 if matches!(self.ir.vars[*v].ty, Type::Unknown { size } if size > 8 || size == 3 || (size > 4 && size < 8))
                     && matches!(ret, Type::Void | Type::Unknown { .. })
-                    && vs.as_ref().map_or(true, |s| self.method_name(s).is_empty()) =>
+                    && vs.as_ref().is_none_or(|s| self.method_name(s).is_empty()) =>
             {
                 let Type::Unknown { size } = self.ir.vars[*v].ty else { unreachable!() };
                 let name = self.ir.vars[*v].name.clone();
@@ -1901,11 +1897,11 @@ impl<'a> Em<'a> {
                 }
                 // a whole object stored through a scalar access of its only member
                 // (`*(u16*)ret = kNullId`): an object assignment
-                let st = strip_cv(&mwdec_lift::types::resolve(self.db, &ty_of(src, self.vars())).into_owned()).clone();
+                let st = strip_cv(&mwdec_lift::types::resolve(self.db, &ty_of(src, self.vars()))).clone();
                 if let (Some(sc), true) = (named(&st).map(|s| s.to_string()), mwdec_lift::types::is_aggregate(self.db, &st)) {
-                    let same = |t: &Type| named(strip_cv(&mwdec_lift::types::resolve(self.db, t).into_owned())).is_some_and(|n| sig::norm_name(n) == sig::norm_name(&sc));
+                    let same = |t: &Type| named(strip_cv(&mwdec_lift::types::resolve(self.db, t))).is_some_and(|n| sig::norm_name(n) == sig::norm_name(&sc));
                     let obj = match dst {
-                        Expr::Load { base, offset: 0, ty } if !mwdec_lift::types::is_aggregate(self.db, ty) && pointee(&ty_of(base, self.vars())).is_some_and(|p| same(p)) => {
+                        Expr::Load { base, offset: 0, ty } if !mwdec_lift::types::is_aggregate(self.db, ty) && pointee(&ty_of(base, self.vars())).is_some_and(&same) => {
                             Some(Expr::Load { base: base.clone(), offset: 0, ty: st.clone() })
                         }
                         Expr::Member { base, offset: 0, ty } if !mwdec_lift::types::is_aggregate(self.db, ty) && same(&ty_of(base, self.vars())) => Some((**base).clone()),
@@ -2224,7 +2220,7 @@ impl<'a> Em<'a> {
             .db
             .and_then(|db| sig::find_class(db, owner))
             .and_then(|c| c.fields.iter().find(|f| f.name == field))
-            .map(|f| f.access.clone());
+            .map(|f| f.access);
         // (MWCC follows C++98: nested classes get no special access to the enclosing class)
         match access {
             Some(mwdec_core::Access::Public) => true,
@@ -2250,7 +2246,7 @@ impl<'a> Em<'a> {
         }
         path.iter().any(|p| match p {
             PathElem::Field(n, owner) if sig::norm_name(owner) != sig::norm_name(&own) => {
-                let access = sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == *n)).map(|f| f.access.clone());
+                let access = sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == *n)).map(|f| f.access);
                 matches!(access, Some(mwdec_core::Access::Protected)) && !self.befriended(owner)
             }
             _ => false,
@@ -2264,14 +2260,7 @@ impl<'a> Em<'a> {
             return None;
         }
         let v = stack_var_of(&args[0], self.ir)?;
-        fn fsym(e: &Expr) -> Option<&str> {
-            match e {
-                Expr::FuncAddr { symbol } => Some(symbol),
-                Expr::Cast { e, .. } => fsym(e),
-                _ => None,
-            }
-        }
-        let ctor = fsym(&args[1])?;
+        let ctor = func_addr(&args[1])?;
         let cls = sig::sig_of(ctor, self.db).this_class?;
         let n = args[4].as_int()?;
         let size = args[3].as_int()?;
@@ -2339,7 +2328,7 @@ impl<'a> Em<'a> {
         let own = self.own_class();
         let fname = sig::split_scope(&self.ir.sig.qualified_name).1.to_string();
         fr.iter().any(|f| {
-            own.as_deref().map_or(false, |o| sig::norm_name(o) == sig::norm_name(f) || last(o) == last(f))
+            own.as_deref().is_some_and(|o| sig::norm_name(o) == sig::norm_name(f) || last(o) == last(f))
                 || (self.ir.sig.this_class.is_none() && (fname == *f || self.ir.sig.qualified_name == *f))
         })
     }
@@ -2409,12 +2398,12 @@ impl<'a> Em<'a> {
                 continue;
             }
             for d in ds {
-                if d.params.is_empty() && !d.is_static && d.inline_body.as_deref().map_or(false, |x| x == body || getter_returns(x, field)) && compatible(&d.ret) {
+                if d.params.is_empty() && !d.is_static && d.inline_body.as_deref().is_some_and(|x| x == body || getter_returns(x, field)) && compatible(&d.ret) {
                     // prefer named const getters over operators
                     let rank = if m.starts_with("operator") { 2 } else if d.is_const { 0 } else { 1 };
                     let const_ret = |t: &Type| matches!(pointee(strip_cv(t)), Some(Type::Const(_))) || matches!(strip_cv(t), Type::Ref(x) if matches!(**x, Type::Const(_)));
                     let const_tie = obj_const && const_ret(&d.ret) && best.as_ref().is_some_and(|(r, bm, bt, _)| rank == *r && bm == m && !const_ret(bt));
-                    if const_tie || best.as_ref().map_or(true, |(r, _, _, _)| rank < *r) {
+                    if const_tie || best.as_ref().is_none_or(|(r, _, _, _)| rank < *r) {
                         best = Some((rank, m.to_string(), d.ret.clone(), d.is_const));
                     }
                 }
@@ -2451,7 +2440,7 @@ impl<'a> Em<'a> {
         };
         let ot = ty_of(obj, self.vars());
         let ct = if ptr { pointee(&ot)?.clone() } else { ot };
-        let cls = named(&mwdec_lift::types::resolve(Some(db), strip_cv(&ct)).into_owned())?.to_string();
+        let cls = named(&mwdec_lift::types::resolve(Some(db), strip_cv(&ct)))?.to_string();
         let at = match base {
             Expr::Load { ty, .. } | Expr::Member { ty, .. } => ty.clone(),
             _ => return None,
@@ -2572,7 +2561,7 @@ impl<'a> Em<'a> {
     /// mangled name, else from the call (`(arg types, return type)`).
     fn declare_function(&mut self, symbol: &str, s: Option<&mwdec_core::FuncSig>, call: Option<(&[Type], &Type)>, conf: u8) {
         let Some(db) = self.db else { return };
-        if self.fn_decls.get(symbol).map_or(false, |(c, _)| *c >= conf) {
+        if self.fn_decls.get(symbol).is_some_and(|(c, _)| *c >= conf) {
             return;
         }
         // (the function itself only when it's an instance of a template the context doesn't
@@ -2706,7 +2695,7 @@ impl<'a> Em<'a> {
         }
         // (an unknown virtual method: the stand-in class's slot gets this return type)
         if let Expr::Call { callee: Callee::Virtual { sig: vs, .. }, ret: Type::Void | Type::Unknown { .. }, .. } = e {
-            if vs.as_ref().map_or(true, |s| self.method_name(s).is_empty()) && !matches!(strip_cv(to), Type::Void | Type::Unknown { size: 0 } | Type::Ref(_)) {
+            if vs.as_ref().is_none_or(|s| self.method_name(s).is_empty()) && !matches!(strip_cv(to), Type::Void | Type::Unknown { size: 0 } | Type::Ref(_)) {
                 self.vt_ret_hint = Some(access_type(to));
                 let s = self.expr(e, 0);
                 self.vt_ret_hint = None;
@@ -2760,7 +2749,7 @@ impl<'a> Em<'a> {
                 // stand-in method returns the class by value
                 Expr::AddrOf(x)
                     if matches!(**inner, Type::Const(_))
-                        && matches!(&**x, Expr::Call { callee: Callee::Virtual { sig: vs, .. }, ret: Type::Void | Type::Unknown { .. }, .. } if vs.as_ref().map_or(true, |s| self.method_name(s).is_empty())) =>
+                        && matches!(&**x, Expr::Call { callee: Callee::Virtual { sig: vs, .. }, ret: Type::Void | Type::Unknown { .. }, .. } if vs.as_ref().is_none_or(|s| self.method_name(s).is_empty())) =>
                 {
                     self.vt_ret_hint = Some(strip_cv(inner).clone());
                     let s = self.expr(x, 0);
@@ -2795,7 +2784,7 @@ impl<'a> Em<'a> {
                     let p = pointee(froms).map(|t| strip_cv(t).clone());
                     let to_const_ptr = matches!(pointee(froms), Some(Type::Const(_)))
                         || matches!(e, Expr::Call { callee: Callee::Method { sig: cs, .. } | Callee::Direct { sig: cs, .. }, args, .. } if self.returns_const_ptr(cs, args.len()));
-                    if !matches!(**inner, Type::Const(_)) && to_const_ptr && p.as_ref().map_or(false, |p| named(p).is_some()) {
+                    if !matches!(**inner, Type::Const(_)) && to_const_ptr && p.as_ref().is_some_and(|p| named(p).is_some()) {
                         let pt = strip_cv(p.as_ref().unwrap()).clone();
                         format!("*const_cast<{}>({})", ptr_to(&pt), self.expr(e, 0))
                     } else if p.as_ref() == Some(strip_cv(inner)) || self.is_base_of(Some(strip_cv(inner)), p.as_ref().unwrap_or(&Type::Void)) {
@@ -2864,7 +2853,7 @@ impl<'a> Em<'a> {
                 let ref_ctor = self.db.and_then(|db| db.decls.get(&format!("{key}::{last}"))).is_some_and(|ds| {
                     ds.iter().any(|d| {
                         d.params.len() == 1
-                            && matches!(strip_cv(&d.params[0].ty), Type::Ref(x) if named(strip_cv(x)).is_some_and(|n| sig::split_scope(&strip_template_args(n)).1 != last) && pointee_ty.as_ref().map_or(true, |p| named(p).map_or(true, |a| sig::split_scope(&strip_template_args(a)).1 != last)))
+                            && matches!(strip_cv(&d.params[0].ty), Type::Ref(x) if named(strip_cv(x)).is_some_and(|n| sig::split_scope(&strip_template_args(n)).1 != last) && pointee_ty.as_ref().is_none_or(|p| named(p).is_none_or(|a| sig::split_scope(&strip_template_args(a)).1 != last)))
                     })
                 });
                 return if ptr_ctor {
@@ -2922,7 +2911,7 @@ impl<'a> Em<'a> {
         let Some(path) = mwdec_lift::types::field_path_of_type(db, cls, off, target) else { return false };
         path.iter().any(|p| match p {
             PathElem::Field(n, owner) if !self.field_accessible(owner, n) => {
-                self.accessor_decl(owner, n).map_or(false, |(_, rt)| matches!(pointee(&rt), Some(Type::Const(_))))
+                self.accessor_decl(owner, n).is_some_and(|(_, rt)| matches!(pointee(&rt), Some(Type::Const(_))))
             }
             _ => false,
         })
@@ -2936,7 +2925,7 @@ impl<'a> Em<'a> {
         }
         let Some(db) = self.db else { return false };
         let key = strip_template_args(&s.qualified_name);
-        db.decls.get(&key).map_or(false, |ds| ds.iter().any(|d| d.params.len() == nargs && matches!(strip_cv(&d.ret), Type::Ptr(x) if matches!(**x, Type::Const(_)))))
+        db.decls.get(&key).is_some_and(|ds| ds.iter().any(|d| d.params.len() == nargs && matches!(strip_cv(&d.ret), Type::Ptr(x) if matches!(**x, Type::Const(_)))))
     }
 
     /// Does the method's header declaration return a reference to const (or is it the const
@@ -3070,7 +3059,7 @@ impl<'a> Em<'a> {
             Expr::Binary { op: op @ (BinOp::Add | BinOp::Sub), l, r, ty } if !is_ptr(strip_cv(ty)) => {
                 let lt = strip_cv(&ty_of(l, self.vars())).clone();
                 let rt = strip_cv(&ty_of(r, self.vars())).clone();
-                let byte_ptr = |t: &Type| is_ptr(t) && pointee(t).map_or(false, |p| scalar_size(strip_cv(p)) == Some(1));
+                let byte_ptr = |t: &Type| is_ptr(t) && pointee(t).is_some_and(|p| scalar_size(strip_cv(p)) == Some(1));
                 if byte_ptr(&lt) && !is_ptr(&rt) {
                     return lt;
                 }
@@ -3188,7 +3177,7 @@ impl<'a> Em<'a> {
             if !matches!(**tp, Type::Const(_)) && is_ptr(&fr) {
                 let key = strip_template_args(&ms.qualified_name);
                 let const_ret = |t: &Type| matches!(pointee(t), Some(Type::Const(_)));
-                let risky = db.and_then(|db| db.decls.get(&key)).map_or(false, |ds| {
+                let risky = db.and_then(|db| db.decls.get(&key)).is_some_and(|ds| {
                     (ds.iter().any(|d| d.is_const && d.params.len() == args.len()) && ds.iter().any(|d| !d.is_const && d.params.len() == args.len()))
                         || ds.iter().any(|d| d.params.len() == args.len() && const_ret(&d.ret))
                 });
@@ -3375,15 +3364,15 @@ impl<'a> Em<'a> {
             // (nested classes of templates aren't)
             None => {
                 let prefix = format!("{base}::");
-                db.decls.range(prefix.clone()..).next().map_or(false, |(k, _)| k.starts_with(&prefix))
-                    || sig::find_class(db, cls).map_or(false, |c| c.vtable.is_empty() && !c.fields.is_empty() && !base.contains("::"))
+                db.decls.range(prefix.clone()..).next().is_some_and(|(k, _)| k.starts_with(&prefix))
+                    || sig::find_class(db, cls).is_some_and(|c| c.vtable.is_empty() && !c.fields.is_empty() && !base.contains("::"))
             }
         }
     }
 
     /// Does the emitter declare `symbol` itself (not in the context)?
     fn self_declared(&self, symbol: &str) -> bool {
-        let known = self.db.map_or(false, |db| db.globals.contains_key(symbol));
+        let known = self.db.is_some_and(|db| db.globals.contains_key(symbol));
         if known {
             return false;
         }
@@ -3394,7 +3383,7 @@ impl<'a> Em<'a> {
         }
         // a function declared in the context, referenced as data (its address)
         let name = symbol_name(symbol);
-        !self.db.map_or(false, |db| db.decls.contains_key(&name) || db.functions.contains_key(symbol))
+        !self.db.is_some_and(|db| db.decls.contains_key(&name) || db.functions.contains_key(symbol))
     }
 
     /// (namespace, name) of a demangled variable in a namespace (not a known class) the context
@@ -3431,13 +3420,13 @@ impl<'a> Em<'a> {
                 // (only an arithmetic scalar or an object needs its address taken; pointers and
                 // arrays are already addresses)
                 Some((_, dt)) => {
-                    let r = strip_cv(&mwdec_lift::types::resolve(self.db, dt).into_owned()).clone();
+                    let r = strip_cv(&mwdec_lift::types::resolve(self.db, dt)).clone();
                     !(matches!(r, Type::Float { .. } | Type::Int { .. } | Type::Bool | Type::Char | Type::Long { .. }) || (matches!(r, Type::Named(_)) && mwdec_lift::types::is_aggregate(self.db, &r)))
                 }
                 // (a static member of a class this draft synthesizes: declared as it's used)
                 None => {
                     let synth_static = sig::demangle(symbol).is_some_and(|dm| sig::split_scope(&dm).0.is_some_and(|sc| self.synth.contains_key(sc)));
-                    !synth_static || self.gtypes.get(symbol).map_or(true, |dt| matches!(dt, Type::Array(..)))
+                    !synth_static || self.gtypes.get(symbol).is_none_or(|dt| matches!(dt, Type::Array(..)))
                 }
             },
             _ => arr(&ty_of(base, self.vars())),
@@ -3829,7 +3818,7 @@ impl<'a> Em<'a> {
         };
         let bt = ty_of(base, self.vars());
         let ct = if ptr { pointee(&bt)?.clone() } else { bt };
-        let cls = named(&mwdec_lift::types::resolve(Some(db), &ct).into_owned())?.to_string();
+        let cls = named(&mwdec_lift::types::resolve(Some(db), &ct))?.to_string();
         let path = match mask {
             Some(m) => mwdec_lift::types::bitfield_at(db, &cls, off, size, m)?.0,
             None => field_path(db, &cls, off, size)?.0,
@@ -4120,7 +4109,7 @@ impl<'a> Em<'a> {
         let s = format!("{b}{}{p}", if ptr { "->" } else { "." });
         // a non-const method on a member read through a getter returning a reference to const
         let via_const_getter = path.iter().any(|q| match q {
-            PathElem::Field(n, owner) if !self.field_accessible(owner, n) => self.accessor_decl(owner, n).map_or(false, |(_, rt)| matches!(pointee(&rt), Some(Type::Const(_)))),
+            PathElem::Field(n, owner) if !self.field_accessible(owner, n) => self.accessor_decl(owner, n).is_some_and(|(_, rt)| matches!(pointee(&rt), Some(Type::Const(_)))),
             _ => false,
         });
         if !is_const_method && via_const_getter {
@@ -4178,7 +4167,7 @@ impl<'a> Em<'a> {
         }
         match access {
             mwdec_core::Access::Public => true,
-            mwdec_core::Access::Protected => self.befriended(owner) || own.map_or(false, |o| self.is_base_of(Some(&Type::Named(owner.to_string())), &Type::Named(o.clone()))),
+            mwdec_core::Access::Protected => self.befriended(owner) || own.is_some_and(|o| self.is_base_of(Some(&Type::Named(owner.to_string())), &Type::Named(o.clone()))),
             mwdec_core::Access::Private => self.befriended(owner),
         }
     }
@@ -4196,7 +4185,7 @@ impl<'a> Em<'a> {
         let last = sig::split_scope(&key).1.to_string();
         if nargs == 0 {
             let dt = format!("{key}::~{last}");
-            if db.decls.get(&dt).map_or(false, |ds| ds.iter().any(|d| d.inline_body.as_deref().map(str::trim) == Some(&format!("{name} ( ) ;")))) {
+            if db.decls.get(&dt).is_some_and(|ds| ds.iter().any(|d| d.inline_body.as_deref().map(str::trim) == Some(&format!("{name} ( ) ;")))) {
                 return Some(Routed::Dtor(format!("~{last}")));
             }
         }
@@ -4330,13 +4319,9 @@ impl<'a> Em<'a> {
         }
     }
 
-    /// The object (as an lvalue expression) a member call is made on, for operator syntax.
-    fn object_lvalue(&mut self, this_e: &Expr, class: Option<&str>) -> String {
-        self.object_lvalue_c(this_e, class, true)
-    }
-
-    /// `object_lvalue` for a method that is const or not (a non-const operator on a const view
-    /// of the object needs it non-const).
+    /// The object (as an lvalue expression) a member call is made on, for operator syntax, for a
+    /// method that is const or not (a non-const operator on a const view of the object needs it
+    /// non-const).
     fn object_lvalue_c(&mut self, this_e: &Expr, class: Option<&str>, is_const_method: bool) -> String {
         let pre = self.object_prefix_c(this_e, class, is_const_method);
         if let Some(p) = pre.strip_suffix("->") {
@@ -4456,7 +4441,7 @@ impl<'a> Em<'a> {
                 Some(r) => (true, r),
                 None => (false, s),
             };
-            let s = s.trim_end_matches(|c| c == 'u' || c == 'U' || c == 'l' || c == 'L');
+            let s = s.trim_end_matches(['u', 'U', 'l', 'L']);
             let v = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) { i64::from_str_radix(h, 16).ok()? } else { s.parse::<i64>().ok()? };
             Some(if neg { -v } else { v })
         };
@@ -4469,7 +4454,7 @@ impl<'a> Em<'a> {
             return a.as_int() == Some(v);
         }
         if let Expr::Float { bits, double } = a {
-            let s = d.trim_end_matches(|c| c == 'f' || c == 'F');
+            let s = d.trim_end_matches(['f', 'F']);
             if let Ok(x) = s.parse::<f64>() {
                 return if *double { *bits == x.to_bits() } else { *bits == (x as f32).to_bits() as u64 };
             }
@@ -4537,7 +4522,7 @@ impl<'a> Em<'a> {
                         let i = self.expr(index, 13);
                         // byte arithmetic on a pointer to wider elements (an element address
                         // recovered inside the byte sum): keep it byte-wise
-                        if is_ptr(&bt) && pointee(&bt).map_or(false, |p| !matches!(scalar_size(strip_cv(p)), Some(1))) {
+                        if is_ptr(&bt) && pointee(&bt).is_some_and(|p| !matches!(scalar_size(strip_cv(p)), Some(1))) {
                             let b = self.expr(base, 14);
                             return format!("({}){b} + {i}", type_str(&t_ptr(ty.clone())));
                         }
@@ -4575,7 +4560,7 @@ impl<'a> Em<'a> {
                     let b = self.expr(base, 15);
                     return format!("{b}[{i}]");
                 }
-                if pointee(&bt).map_or(false, |p| same_scalar(p, ty)) {
+                if pointee(&bt).is_some_and(|p| same_scalar(p, ty)) {
                     let b = self.expr(base, 15);
                     format!("{b}[{i}]")
                 } else {
@@ -4662,7 +4647,7 @@ impl<'a> Em<'a> {
                     let lp = is_ptr(&lt);
                     let rp = is_ptr(&rt);
                     // char* +/- int is byte arithmetic already (the IR's meaning)
-                    let byte_ptr = |t: &Type| pointee(t).map_or(false, |p| scalar_size(strip_cv(p)) == Some(1));
+                    let byte_ptr = |t: &Type| pointee(t).is_some_and(|p| scalar_size(strip_cv(p)) == Some(1));
                     let byte_arith = matches!(op, BinOp::Add | BinOp::Sub) && ((lp && !rp && byte_ptr(&lt)) || (rp && !lp && *op == BinOp::Add && byte_ptr(&rt)));
                     if (lp || rp) && !byte_arith {
                         let ls2 = if lp { format!("(unsigned int){}", self.expr(l, 14)) } else { ls.clone() };
@@ -5191,7 +5176,7 @@ fn int_lit(value: i64, ty: &Type, null: &str) -> String {
         // 64-bit constants need the suffix (`1LL << n` is a 64-bit shift)
         Type::Int { size: 8, signed } => {
             let sfx = if *signed { "LL" } else { "ULL" };
-            if value < -0x10000 || value > 0xffff {
+            if !(-0x10000..=0xffff).contains(&value) {
                 if value < 0 && *signed {
                     format!("-0x{:x}{sfx}", -(value as i128))
                 } else {
@@ -5212,7 +5197,7 @@ fn int_lit(value: i64, ty: &Type, null: &str) -> String {
             }
         }
         _ => {
-            if value < -0x10000 || value > 0xffff {
+            if !(-0x10000..=0xffff).contains(&value) {
                 if value < 0 {
                     format!("-0x{:x}", -value)
                 } else {
@@ -5554,14 +5539,20 @@ pub fn strip_template_args(s: &str) -> String {
     out
 }
 
+/// The function whose address `e` is (under casts).
+fn func_addr(e: &Expr) -> Option<&str> {
+    match strip_casts(e) {
+        Expr::FuncAddr { symbol } => Some(symbol),
+        _ => None,
+    }
+}
+
 fn render_path(path: &[PathElem]) -> String {
     let mut s = String::new();
     for p in path {
         match p {
             PathElem::Field(n, _) => {
-                if !s.is_empty() && !s.ends_with(']') {
-                    s.push('.');
-                } else if s.ends_with(']') {
+                if !s.is_empty() {
                     s.push('.');
                 }
                 s.push_str(n);
@@ -5593,16 +5584,9 @@ fn access_ok(db: Option<&TypeDb>, field: &Type, access: &Type) -> bool {
     is_float(&fr) == is_float(access)
 }
 
+/// The same type up to cv-qualifiers (integers of one size but different signedness differ).
 fn same_scalar(a: &Type, b: &Type) -> bool {
-    let a = strip_cv(a);
-    let b = strip_cv(b);
-    if a == b {
-        return true;
-    }
-    match (a, b) {
-        (Type::Int { size: x, .. }, Type::Int { size: y, .. }) => x == y && false,
-        _ => false,
-    }
+    strip_cv(a) == strip_cv(b)
 }
 
 /// Type to use in a raw pointer cast for an access.

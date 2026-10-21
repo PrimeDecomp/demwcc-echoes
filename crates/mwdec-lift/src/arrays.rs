@@ -36,7 +36,7 @@ fn split_index(e: &Expr, vars: &[Var], db: Option<&TypeDb>) -> Option<(Expr, u32
                 (Some(n), _) => ((**r).clone(), n),
                 _ => return None,
             };
-            if n < 2 || n > 0x10000 {
+            if !(2..=0x10000).contains(&n) {
                 return None;
             }
             Some((x, n as u32, 0))
@@ -151,7 +151,7 @@ fn container_field(db: &TypeDb, cls: &str, off: i32, esz: u32, depth: u32) -> Op
                         let go = fo + g.offset as i32;
                         let gt = types::resolve(Some(db), &g.ty).into_owned();
                         let gs = types::size_of(Some(db), &gt).unwrap_or(0) as i32;
-                        if matches!(strip_cv(&gt), Type::Array(..)) && gs > 0 && gs as u32 % esz == 0 && off >= go && off < go + gs {
+                        if matches!(strip_cv(&gt), Type::Array(..)) && gs > 0 && (gs as u32).is_multiple_of(esz) && off >= go && off < go + gs {
                             return Some((fo, f.ty.clone(), go, et));
                         }
                     }
@@ -191,7 +191,7 @@ fn finish(elem: Expr, et: &Type, inner: i32, ty: &Type, db: Option<&TypeDb>) -> 
         // an element that is itself an array (`g[i][k]`): the access is one of its elements
         let s2 = types::size_of(db, e2)?;
         let ts = scalar_size(ty)?;
-        if s2 == 0 || inner < 0 || inner as u32 % s2 != 0 || ts != s2 || is_float(e2) != is_float(ty) || types::is_aggregate(db, e2) {
+        if s2 == 0 || inner < 0 || !(inner as u32).is_multiple_of(s2) || ts != s2 || is_float(e2) != is_float(ty) || types::is_aggregate(db, e2) {
             return None;
         }
         return Some(Expr::Index { base: Box::new(elem), index: Box::new(Expr::int((inner as u32 / s2) as i64)), ty: (**e2).clone() });
@@ -226,7 +226,7 @@ fn byte_sum(base: &Expr, vars: &[Var]) -> Option<(Expr, Expr)> {
         Expr::AddrOf(a) => match &**a {
             Expr::Index { base: cp, index, ty: bt } if scalar_size(bt) == Some(1) => match &**cp {
                 Expr::Cast { e: p, .. } => Some(((**p).clone(), (**index).clone())),
-                p if pointee(&types::ty_of(p, vars)).map_or(false, |t| scalar_size(t) == Some(1)) => Some((p.clone(), (**index).clone())),
+                p if pointee(&types::ty_of(p, vars)).is_some_and(|t| scalar_size(t) == Some(1)) => Some((p.clone(), (**index).clone())),
                 _ => None,
             },
             _ => None,
@@ -234,10 +234,10 @@ fn byte_sum(base: &Expr, vars: &[Var]) -> Option<(Expr, Expr)> {
         Expr::Binary { op: BinOp::Add, l, r, .. } => match &**l {
             Expr::Cast { e: p, ty } if !is_ptr(ty) && (is_ptr(&types::ty_of(p, vars)) || matches!(**p, Expr::AddrOf(_))) => Some(((**p).clone(), (**r).clone())),
             // `(u8*)p + idx` (indexed loads/stores)
-            Expr::Cast { e: p, ty } if pointee(ty).map_or(false, |t| scalar_size(t) == Some(1)) && (is_ptr(&types::ty_of(p, vars)) || matches!(**p, Expr::AddrOf(_))) => {
+            Expr::Cast { e: p, ty } if pointee(ty).is_some_and(|t| scalar_size(t) == Some(1)) && (is_ptr(&types::ty_of(p, vars)) || matches!(**p, Expr::AddrOf(_))) => {
                 Some(((**p).clone(), (**r).clone()))
             }
-            p if pointee(&types::ty_of(p, vars)).map_or(false, |t| scalar_size(t) == Some(1)) => Some((p.clone(), (**r).clone())),
+            p if pointee(&types::ty_of(p, vars)).is_some_and(|t| scalar_size(t) == Some(1)) => Some((p.clone(), (**r).clone())),
             _ => None,
         },
         _ => None,
@@ -261,7 +261,7 @@ fn try_array(e: &Expr, vars: &[Var], db: Option<&TypeDb>, defs: &HashMap<VarId, 
         None => return two_level(p, index, *offset, ty, vars, db, defs),
     };
     let off = *offset as i64 + k;
-    if off < 0 || off > 0x100000 {
+    if !(0..=0x100000).contains(&off) {
         return None;
     }
     let off = off as i32;
@@ -508,13 +508,7 @@ fn forward_address_temps(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&TypeDb>
     let mut uses: HashMap<VarId, usize> = HashMap::new();
     crate::inline::count_uses(body, &mut uses);
     let mut ndefs: HashMap<VarId, usize> = HashMap::new();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for s in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = s {
-                *ndefs.entry(*v).or_default() += 1;
-            }
-        }
-    });
+    crate::inline::count_defs(body, &mut ndefs);
     Stmt::for_each_block_mut(body, &mut |b| {
         let mut i = 0;
         while i + 1 < b.len() {
@@ -588,7 +582,7 @@ fn forward_address_temps(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&TypeDb>
                 });
                 m
             };
-            if total == 0 || seen != total || (span > i + 2 && (b[i + 1..=span].iter().any(stmt_has_call) || b[i + 2..span].iter().any(|s| reads_memory(s)))) {
+            if total == 0 || seen != total || (span > i + 2 && (b[i + 1..=span].iter().any(stmt_has_call) || b[i + 2..span].iter().any(reads_memory))) {
                 i += 1;
                 continue;
             }
@@ -676,7 +670,7 @@ pub(crate) fn type_indexed_globals(body: &mut Vec<Stmt>, vars: &[Var], db: Optio
             _ => None,
         }
     }
-    let declared = |sym: &str| db.map_or(false, |d| d.globals.contains_key(sym));
+    let declared = |sym: &str| db.is_some_and(|d| d.globals.contains_key(sym));
     let mut acc: HashMap<String, Acc> = HashMap::new();
     // indexed accesses first (their bases are skipped by the scan below)
     let mut handled: Vec<*const Expr> = vec![];
@@ -710,7 +704,7 @@ pub(crate) fn type_indexed_globals(body: &mut Vec<Stmt>, vars: &[Var], db: Optio
         let a = acc.entry(sym).or_default();
         a.size = size;
         match split_index(&idx, vars, db) {
-            Some((_, esz, k)) if scalar_size(ty).map_or(false, |s| s > 0) => a.indexed.push((esz, addend + *offset as i64 + k, ty.clone())),
+            Some((_, esz, k)) if scalar_size(ty).is_some_and(|s| s > 0) => a.indexed.push((esz, addend + *offset as i64 + k, ty.clone())),
             // a byte element indexed by a plain integer
             None if scalar_size(ty) == Some(1) && idx.as_int().is_none() && !is_ptr(&types::ty_of(&idx, vars)) => a.indexed.push((1, addend + *offset as i64, ty.clone())),
             _ => a.bad = true,
@@ -1041,7 +1035,7 @@ fn container_rewrite(e: &mut Expr, vars: &[Var], db: &TypeDb, allow_const: bool)
                 let go = g.offset as i32;
                 let gt = types::resolve(Some(db), &g.ty).into_owned();
                 let gs = types::size_of(Some(db), &gt).unwrap_or(0) as i32;
-                (matches!(strip_cv(&gt), Type::Array(..)) && gs > 0 && esz > 0 && gs as u32 % esz == 0 && offset >= go && offset < go + gs).then(|| (go, et.clone()))
+                (matches!(strip_cv(&gt), Type::Array(..)) && gs > 0 && esz > 0 && (gs as u32).is_multiple_of(esz) && offset >= go && offset < go + gs).then(|| (go, et.clone()))
             })
         });
         let whole_obj = own.is_some();
@@ -1365,7 +1359,7 @@ pub fn absolute_globals(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
             if let Expr::Load { base, .. } = e {
                 if let Expr::Var(v) = &**base {
                     if let Some(src) = subst.get(v) {
-                        *base = Box::new(src.clone());
+                        **base = src.clone();
                     }
                 }
             }
@@ -1378,7 +1372,7 @@ pub fn absolute_globals(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
             let a = (k as u32).wrapping_add(*offset as u32);
             for (name, start, et, es, cnt) in &regions {
                 let end = start.wrapping_add(es * cnt);
-                if a >= *start && a < end && (a - start) % es == 0 && n % es == 0 && scalar_size(ty) == Some(*es) {
+                if a >= *start && a < end && (a - start).is_multiple_of(*es) && n % es == 0 && scalar_size(ty) == Some(*es) {
                     let it = Type::Int { size: 4, signed: true };
                     let mut idx = if n / es == 1 { x.clone() } else { Expr::bin(BinOp::Mul, x.clone(), Expr::int((n / es) as i64), it.clone()) };
                     if a > *start {

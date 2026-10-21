@@ -4,24 +4,7 @@
 //! best-effort semantics preserving rewrites; the strict comparator is the judge.
 use crate::cst::{strip_parens, Cst, Edit};
 use crate::func::{self, infer_type, is_int_type};
-use crate::ops::M;
-
-fn indent_of(cst: &Cst, n: usize) -> String {
-    let s = cst.nodes[n].start;
-    let ls = cst.src[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    cst.src[ls..s].chars().take_while(|c| c.is_whitespace()).collect()
-}
-
-fn cond_value(c: &Cst, stmt: usize) -> Option<usize> {
-    let cc = c.child(stmt, "condition")?;
-    match c.kind(cc) {
-        "condition_clause" => {
-            let v = c.child(cc, "value")?;
-            (c.kind(v) != "declaration").then_some(v)
-        }
-        _ => None,
-    }
-}
+use crate::ops::{case_stmts, cond_value, ends_in_jump, indent_of, M};
 
 fn pure_simple(c: &Cst, n: usize) -> bool {
     !c.descendants(n).into_iter().any(|d| {
@@ -39,12 +22,6 @@ fn is_case_const(c: &Cst, n: usize) -> bool {
     }
 }
 
-/// Statements (named, non-comment) of a case_statement after the label.
-fn case_body(c: &Cst, case: usize) -> Vec<usize> {
-    let v = c.child(case, "value");
-    c.named(case).into_iter().filter(|&s| Some(s) != v && func::is_stmt(c.kind(s))).collect()
-}
-
 /// `break` statements that belong to switch/loop `owner` inside `n`.
 fn own_breaks(c: &Cst, owner: usize, n: usize) -> Vec<usize> {
     c.descendants(n)
@@ -52,14 +29,6 @@ fn own_breaks(c: &Cst, owner: usize, n: usize) -> Vec<usize> {
         .filter(|&d| c.kind(d) == "break_statement")
         .filter(|&d| c.ancestors(d).into_iter().find(|&a| matches!(c.kind(a), "switch_statement" | "for_statement" | "while_statement" | "do_statement")) == Some(owner))
         .collect()
-}
-
-fn ends_in_jump(c: &Cst, s: usize) -> bool {
-    match c.kind(s) {
-        "return_statement" | "break_statement" | "continue_statement" | "goto_statement" => true,
-        "compound_statement" => c.named(s).into_iter().filter(|&x| func::is_stmt(c.kind(x))).last().is_some_and(|l| ends_in_jump(c, l)),
-        _ => false,
-    }
 }
 
 struct CaseGroup {
@@ -87,7 +56,7 @@ fn case_groups(c: &Cst, sw: usize) -> Option<Vec<CaseGroup>> {
     for (k, &cs) in cases.iter().enumerate() {
         pending.push(c.child(cs, "value"));
         pend_nodes.push(cs);
-        let mut b = case_body(c, cs);
+        let mut b = case_stmts(c, cs);
         if b.is_empty() {
             if k + 1 == cases.len() {
                 groups.push(CaseGroup { labels: std::mem::take(&mut pending), body: vec![], terminated: true, nodes: std::mem::take(&mut pend_nodes) });
@@ -358,7 +327,7 @@ pub fn op_case_order(m: &mut M) -> Option<Vec<Edit>> {
 
 fn has_break_after(c: &Cst, g: &CaseGroup) -> bool {
     let last = *g.nodes.last().unwrap();
-    case_body(c, last).last().is_some_and(|&l| c.kind(l) == "break_statement")
+    case_stmts(c, last).last().is_some_and(|&l| c.kind(l) == "break_statement")
 }
 
 /// Integer compare against a literal in the neighbouring form: `x < K` <-> `x <= K-1`,
@@ -1336,7 +1305,7 @@ pub fn op_forward_stack(m: &mut M) -> Option<Vec<Edit>> {
         if stores.len() == 1 && others.len() == 1 {
             let (st, rhs) = stores[0];
             let u = others[0];
-            if !c.parent(u).is_some_and(|p| c.kind(p) == "argument_list") || c.nodes[u].start < c.nodes[st].end {
+            if c.parent(u).is_none_or(|p| c.kind(p) != "argument_list") || c.nodes[u].start < c.nodes[st].end {
                 continue;
             }
             let r = strip_any_casts(c, rhs);
@@ -1353,7 +1322,7 @@ pub fn op_forward_stack(m: &mut M) -> Option<Vec<Edit>> {
             cands.push(e);
         } else if stores.is_empty() && others.len() == 1 && c.kind(ds[0]) == "init_declarator" {
             let u = others[0];
-            if !c.parent(u).is_some_and(|p| c.kind(p) == "argument_list") {
+            if c.parent(u).is_none_or(|p| c.kind(p) != "argument_list") {
                 continue;
             }
             let Some(v) = c.child(ds[0], "value") else { continue };
@@ -1538,7 +1507,7 @@ fn comp_shape(c: &Cst, n: usize, comp: usize, res: &dyn Fn(usize) -> Option<(usi
         n = v;
     }
     if let Some((a, k)) = get_component(c, n) {
-        return (k == comp).then(|| a);
+        return (k == comp).then_some(a);
     }
     if c.kind(n) != "binary_expression" {
         return None;

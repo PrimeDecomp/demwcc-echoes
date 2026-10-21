@@ -3,6 +3,7 @@
 
 use crate::matcher::{expand, Env};
 use crate::util::*;
+use mwdec_lift::strip_cv;
 use mwdec_core::Type;
 use mwdec_lift::types::ty_of;
 use mwdec_lift::{BinOp, Expr, VarKind};
@@ -10,10 +11,10 @@ use mwdec_lift::{BinOp, Expr, VarKind};
 fn strip_ptr_casts(mut e: Expr, env: &Env) -> Expr {
     loop {
         match e {
-            Expr::Cast { ty, e: inner } if matches!(strip(&ty), Type::Ptr(_)) && matches!(strip(&ty_of(&inner, env.vars)), Type::Ptr(_) | Type::Ref(_)) => e = *inner,
-            Expr::Cast { ty, e: inner } if matches!(strip(&ty), Type::Ptr(_)) && matches!(&*inner, Expr::AddrOf(_)) => e = *inner,
+            Expr::Cast { ty, e: inner } if matches!(strip_cv(&ty), Type::Ptr(_)) && matches!(strip_cv(&ty_of(&inner, env.vars)), Type::Ptr(_) | Type::Ref(_)) => e = *inner,
+            Expr::Cast { ty, e: inner } if matches!(strip_cv(&ty), Type::Ptr(_)) && matches!(&*inner, Expr::AddrOf(_)) => e = *inner,
             // the hidden return-slot pointer (typed as the returned object)
-            Expr::Cast { ty, e: inner } if matches!(strip(&ty), Type::Ptr(_)) && matches!(&*inner, Expr::Var(v) if env.vars[*v].kind == VarKind::StructRet) => e = *inner,
+            Expr::Cast { ty, e: inner } if matches!(strip_cv(&ty), Type::Ptr(_)) && matches!(&*inner, Expr::Var(v) if env.vars[*v].kind == VarKind::StructRet) => e = *inner,
             other => return other,
         }
     }
@@ -27,7 +28,7 @@ pub fn canon_ptr(b: &Expr, env: &Env) -> (Expr, i32) {
             Some(r) => r,
             None => (b.clone(), 0),
         },
-        Expr::Binary { op: BinOp::Add, l, r, .. } => match (&**r, matches!(strip(&ty_of(l, env.vars)), Type::Ptr(_) | Type::Ref(_))) {
+        Expr::Binary { op: BinOp::Add, l, r, .. } => match (&**r, matches!(strip_cv(&ty_of(l, env.vars)), Type::Ptr(_) | Type::Ref(_))) {
             (Expr::Int { value, .. }, true) => {
                 // byte arithmetic only (`(char*)p + k`)
                 let elem = mwdec_lift::pointee(&ty_of(l, env.vars)).and_then(mwdec_lift::scalar_size).unwrap_or(0);
@@ -49,7 +50,7 @@ pub fn lvalue_addr(x: &Expr, env: &Env) -> Option<(Expr, i32)> {
     match x {
         Expr::Var(v) => {
             let var = &env.vars[*v];
-            match strip(&var.ty) {
+            match strip_cv(&var.ty) {
                 Type::Ref(_) => Some((x.clone(), 0)),
                 _ if matches!(var.kind, VarKind::Stack { .. } | VarKind::Param { .. } | VarKind::Local) => Some((Expr::AddrOf(Box::new(x.clone())), 0)),
                 _ => None,
@@ -114,7 +115,7 @@ pub fn object_at(p: &Expr, off: i32, cls: &str, env: &Env) -> Option<(Expr, Expr
         let dt = Type::Named(d);
         let outer_lv = match p {
             Expr::AddrOf(x) => Expr::Member { base: x.clone(), offset: off, ty: dt },
-            _ if matches!(strip(&ty_of(p, env.vars)), Type::Ref(_)) => Expr::Member { base: Box::new(p.clone()), offset: off, ty: dt },
+            _ if matches!(strip_cv(&ty_of(p, env.vars)), Type::Ref(_)) => Expr::Member { base: Box::new(p.clone()), offset: off, ty: dt },
             _ => Expr::Load { base: Box::new(p.clone()), offset: off, ty: dt },
         };
         let lv = Expr::Member { base: Box::new(outer_lv), offset: 0, ty: ct };
@@ -130,7 +131,7 @@ pub fn object_at(p: &Expr, off: i32, cls: &str, env: &Env) -> Option<(Expr, Expr
             }
         }
         _ => {
-            let is_ref = matches!(strip(&ty_of(p, env.vars)), Type::Ref(_));
+            let is_ref = matches!(strip_cv(&ty_of(p, env.vars)), Type::Ref(_));
             if same {
                 let lv = if is_ref { p.clone() } else { Expr::Load { base: Box::new(p.clone()), offset: 0, ty: Type::Named(outer) } };
                 // (a reference variable is the object: its address is `&r`)

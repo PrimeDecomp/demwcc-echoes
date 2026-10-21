@@ -9,13 +9,6 @@ use crate::InlineLib;
 use mwdec_lift::ir::*;
 use mwdec_core::{Type, TypeDb};
 
-fn strip_casts(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_casts(e),
-        e => e,
-    }
-}
-
 fn untyped_ptr(t: &Type) -> bool {
     match strip_cv(t) {
         Type::Ptr(p) => matches!(strip_cv(p), Type::Void | Type::Unknown { .. } | Type::Int { size: 1, .. } | Type::Char),

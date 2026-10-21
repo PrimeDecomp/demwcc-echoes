@@ -146,11 +146,10 @@ impl<'a> Resolver<'a> {
             let prefix = format!("{base}<{}", args.join(", "));
             let mut best: Option<&String> = None;
             for n in list {
-                if n.starts_with(&prefix) && n[prefix.len()..].starts_with(", ") {
-                    if best.is_none_or(|b| n.len() < b.len()) {
+                if n.starts_with(&prefix) && n[prefix.len()..].starts_with(", ")
+                    && best.is_none_or(|b| n.len() < b.len()) {
                         best = Some(n);
                     }
-                }
             }
             if let Some(b) = best {
                 return b.clone();

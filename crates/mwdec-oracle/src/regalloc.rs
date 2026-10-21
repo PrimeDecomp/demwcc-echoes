@@ -223,7 +223,7 @@ pub fn solve_order_constrained(nodes: &[Node], observed: &[RegId], before: &[(us
         }
         false
     }
-    let float = nodes.first().map_or(false, |n| n.float);
+    let float = nodes.first().is_some_and(|n| n.float);
     let nonvol: Vec<RegId> = if float { (46u8..=63).rev().collect() } else { (14u8..=31).rev().collect() };
     let mut assigned = vec![None; nodes.len()];
     let mut obtained = vec![];
@@ -376,7 +376,7 @@ fn exists_order_with(nodes: &[Node], observed: &[RegId], first: usize, second: u
         }
         false
     }
-    let float = nodes.first().map_or(false, |n| n.float);
+    let float = nodes.first().is_some_and(|n| n.float);
     let nonvol: Vec<RegId> = if float { (46u8..=63).rev().collect() } else { (14u8..=31).rev().collect() };
     let mut assigned = vec![None; nodes.len()];
     let mut obtained = vec![];

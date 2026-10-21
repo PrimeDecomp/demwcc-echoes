@@ -377,7 +377,7 @@ fn match_seq(m: &mut M, p: &[Stmt], t: &[Stmt], ti: usize) -> Option<usize> {
     }
     // an `if` decided by constant arguments: the compiler kept only one arm (constfold.rs)
     if let Stmt::If { cond, then, els } = first {
-        if std::env::var("MWDI_NO_CONSTIF").is_err() && crate::constfold::decidable(cond, &m.t.holes) {
+        if !env_flag!("MWDI_NO_CONSTIF") && crate::constfold::decidable(cond, &m.t.holes) {
             for (arm, want) in [(then, true), (els, false)] {
                 let mut rest: Vec<Stmt> = arm.clone();
                 rest.extend_from_slice(&p[1..]);
@@ -397,16 +397,6 @@ fn match_seq(m: &mut M, p: &[Stmt], t: &[Stmt], ti: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn uses_in(b: &[Stmt], v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(b, &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1;
-        }
-    });
-    n
 }
 
 /// Find and replace (pre-order) the first subexpression of `e` matching `r`.
@@ -580,12 +570,12 @@ pub fn try_stmts_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, idx:
                     }
                 });
             }
-            let first_use = (end..(end + 8).min(b.len())).find(|&k| bound_locals.iter().any(|v| uses_in(std::slice::from_ref(&b[k]), *v) > 0));
+            let first_use = (end..(end + 8).min(b.len())).find(|&k| bound_locals.iter().any(|v| mwdec_lift::count_var(std::slice::from_ref(&b[k]), *v) > 0));
             if let Some(k) = first_use {
                 if let Stmt::Assign { dst: Expr::Var(dv), src } = &b[k] {
                     let mut mm = M { env: m.env, t: m.t, b: m.b.clone(), folded: vec![] };
                     let local = matches!(env.vars[*dv].kind, VarKind::Local);
-                    let untouched = uses_in(&b[i..k], *dv) == 0;
+                    let untouched = mwdec_lift::count_var(&b[i..k], *dv) == 0;
                     if local && untouched && mm.m(&r, src) {
                         // nothing in between may write what the value reads
                         let mut rd = vec![];
@@ -601,7 +591,7 @@ pub fn try_stmts_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, idx:
             }
         }
         if let Some((k, dv, call)) = later {
-            let ok = bound_locals.iter().all(|v| uses_in(whole, *v) == uses_in(&window, *v) + uses_in(std::slice::from_ref(&b[k]), *v));
+            let ok = bound_locals.iter().all(|v| mwdec_lift::count_var(whole, *v) == mwdec_lift::count_var(&window, *v) + mwdec_lift::count_var(std::slice::from_ref(&b[k]), *v));
             if ok {
                 b.remove(k);
                 b.splice(i..end, [Stmt::Assign { dst: Expr::Var(dv), src: call }]);
@@ -609,10 +599,10 @@ pub fn try_stmts_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, idx:
             }
         }
         let consumed = |v: VarId| match &replaced_next {
-            Some(s) => uses_in(std::slice::from_ref(&b[end]), v).saturating_sub(uses_in(std::slice::from_ref(s), v)),
+            Some(s) => mwdec_lift::count_var(std::slice::from_ref(&b[end]), v).saturating_sub(mwdec_lift::count_var(std::slice::from_ref(s), v)),
             None => 0,
         };
-        let ok = bound_locals.iter().all(|v| uses_in(whole, *v) == uses_in(&window, *v) + consumed(*v));
+        let ok = bound_locals.iter().all(|v| mwdec_lift::count_var(whole, *v) == mwdec_lift::count_var(&window, *v) + consumed(*v));
         if !ok {
             continue;
         }
@@ -631,7 +621,7 @@ pub fn try_stmts_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, idx:
                 // itself (`p = in.ptr; in.ptr = p + 1; ... *p`), the inline didn't return it
                 // (unless every store of the window is to a member the function can't name: then
                 // the source can't have written it, `in.ReadUint16();` with its value unused)
-                if result.is_some() && !m.folded.is_empty() && !(std::env::var("MWDI_NO_HIDDEN_STORES").is_err() && hidden_stores_only(&b[i..end], env)) {
+                if result.is_some() && !m.folded.is_empty() && !(!env_flag!("MWDI_NO_HIDDEN_STORES") && hidden_stores_only(&b[i..end], env)) {
                     continue;
                 }
                 let Some(call) = mk(&m) else { continue };
@@ -684,7 +674,7 @@ fn try_ctor_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, t: &Templ
         }
     }
     let mut m = M::new(env, t);
-    if std::env::var("MWDI_TRACE_CTOR").is_ok_and(|f| t.name.contains(f.as_str())) && b.len() > i {
+    if env_value!("MWDI_TRACE_CTOR").is_some_and(|f| t.name.contains(f)) && b.len() > i {
         let mut m2 = M::new(env, t);
         let mut k = 0;
         while k < stmts.len() && i + k < b.len() && match_stmt(&mut m2, &stmts[k], &b[i + k]) {
@@ -707,7 +697,7 @@ fn try_ctor_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, t: &Templ
                         return false;
                     }
                     m = M::new(env, t);
-                    if std::env::var("MWDI_TRACE_CTOR").is_ok_and(|f| t.name.contains(f.as_str())) {
+                    if env_value!("MWDI_TRACE_CTOR").is_some_and(|f| t.name.contains(f)) {
                         eprintln!("CTOR {} split {:?}
   vs {:?}", t.name, split, &b[i..(i + split.len()).min(b.len())]);
                     }
@@ -731,13 +721,13 @@ fn try_ctor_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, t: &Templ
     let window = &b[i..oend];
     for (h, k) in t.holes.iter().enumerate() {
         if let (HoleKind::Local, Some(Bind::Val(Expr::Var(v)))) = (k, &m.b[h]) {
-            if uses_in(whole, *v) != uses_in(window, *v) {
+            if mwdec_lift::count_var(whole, *v) != mwdec_lift::count_var(window, *v) {
                 return false;
             }
         }
     }
     let Some((mut args, _)) = m.finalize(0) else {
-        if std::env::var("MWDI_TRACE_CTOR").is_ok_and(|f| t.name.contains(f.as_str())) {
+        if env_value!("MWDI_TRACE_CTOR").is_some_and(|f| t.name.contains(f)) {
             eprintln!("CTOR {} finalize failed {:?}", t.name, m.b);
         }
         return false;
@@ -847,7 +837,7 @@ fn try_interleaved_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, t:
             let Stmt::Assign { dst: Expr::Var(v), src } = &b[a] else { return false };
             let mut rd = vec![];
             crate::safety::reads(&crate::matcher::expand(src, env.defs), env, &mut rd);
-            used.iter().filter(|&&w| w < a).all(|&w| !crate::safety::clobbers(&b[w], &rd, env) && uses_in(std::slice::from_ref(&b[w]), *v) == 0)
+            used.iter().filter(|&&w| w < a).all(|&w| !crate::safety::clobbers(&b[w], &rd, env) && mwdec_lift::count_var(std::slice::from_ref(&b[w]), *v) == 0)
         });
         let tr = TRI.get().cloned().flatten().is_some_and(|f| t.name.contains(f.as_str()));
         if !ok {
@@ -858,7 +848,7 @@ fn try_interleaved_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &Env, t:
         }
         let window: Vec<Stmt> = used.iter().map(|&w| b[w].clone()).collect();
         let locals_ok = t.holes.iter().enumerate().all(|(h, kd)| match (kd, &m.b[h]) {
-            (HoleKind::Local, Some(Bind::Val(Expr::Var(v)))) => uses_in(whole, *v) == uses_in(&window, *v),
+            (HoleKind::Local, Some(Bind::Val(Expr::Var(v)))) => mwdec_lift::count_var(whole, *v) == mwdec_lift::count_var(&window, *v),
             _ => true,
         });
         if !locals_ok {
@@ -897,7 +887,7 @@ fn hidden_stores_only(w: &[Stmt], env: &Env) -> bool {
         };
         let Some((p, off)) = crate::addr::access(dst, env) else { return false };
         let Some(outer) = crate::addr::outer_class(&p, env) else { return false };
-        let size = mwdec_lift::scalar_size(crate::util::strip(&ty)).unwrap_or(0);
+        let size = mwdec_lift::scalar_size(mwdec_lift::strip_cv(&ty)).unwrap_or(0);
         let Some((path, _)) = mwdec_lift::types::field_path(env.db, &outer, off, size) else { return false };
         let hidden = path.iter().any(|pe| matches!(pe, mwdec_lift::types::PathElem::Field(n, owner) if !crate::matcher::member_accessible(env.db, owner, n)));
         if !hidden {

@@ -29,7 +29,7 @@ fn deref_accessor(t: &Template) -> Option<(i32, i32)> {
 /// Split a load whose offset folds a dereferencing accessor's constant (see the module docs).
 /// Returns whether `e` was rewritten.
 pub fn try_split(e: &mut Expr, env: &Env) -> bool {
-    if std::env::var_os("MWDI_NO_COMPOSED").is_some() {
+    if env_flag!("MWDI_NO_COMPOSED") {
         return false;
     }
     let Expr::Load { base, offset: k, ty } = &*e else { return false };
@@ -41,7 +41,7 @@ pub fn try_split(e: &mut Expr, env: &Env) -> bool {
     if !matches!(res(base, env.defs), Expr::Load { .. }) {
         return false;
     }
-    let trace = std::env::var_os("MWDI_TRACE_COMPOSED").is_some();
+    let trace = env_flag!("MWDI_TRACE_COMPOSED");
     if trace {
         eprintln!("composed: load +{k:#x} of {:?}", res(base, env.defs));
     }
@@ -79,9 +79,9 @@ pub fn try_split(e: &mut Expr, env: &Env) -> bool {
         if trace {
             eprintln!("composed:   {} finalized score {sc} args {:?}", t.name, args);
         }
-        if best.as_ref().map_or(true, |(_, b, _)| sc > *b) {
+        if best.as_ref().is_none_or(|(_, b, _)| sc > *b) {
             let mut call = make_call(t, args);
-            if let (Expr::Call { ret, .. }, Type::Ref(inner)) = (&mut call, crate::util::strip(&t.sig.ret)) {
+            if let (Expr::Call { ret, .. }, Type::Ref(inner)) = (&mut call, mwdec_lift::strip_cv(&t.sig.ret)) {
                 *ret = (**inner).clone();
             }
             best = Some((call, sc, c));

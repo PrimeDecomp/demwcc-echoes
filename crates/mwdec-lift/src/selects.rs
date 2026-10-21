@@ -7,12 +7,6 @@
 use crate::ir::*;
 use mwdec_core::Type;
 
-fn count_var(stmts: &[Stmt], v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(stmts, &mut |e| n += matches!(e, Expr::Var(x) if *x == v) as usize);
-    n
-}
-
 /// Candidates: (index of `v = K1`, index of the `if`, v, K1, K2, cond).
 fn find(b: &[Stmt]) -> Option<(usize, usize, VarId, i64, i64, Expr)> {
     for i in 0..b.len() {

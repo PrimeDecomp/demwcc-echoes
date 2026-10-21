@@ -72,7 +72,7 @@ fn lex(src: &str) -> Vec<Tok> {
                 i += 1;
             }
             k = K::Id;
-        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).map_or(false, |d| d.is_ascii_digit())) {
+        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit())) {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || ((b[i] == b'-' || b[i] == b'+') && matches!(b[i - 1], b'e' | b'E') && !src[start..i].starts_with("0x"))) {
                 i += 1;
             }
@@ -141,7 +141,7 @@ fn looks_like_type(t: &[Tok], sg: &[usize], a: usize, b: usize) -> bool {
                     }
                 }
                 builtin |= is_builtin(s);
-                upper |= s.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+                upper |= s.chars().next().is_some_and(|c| c.is_ascii_uppercase());
                 saw_name = true;
             }
             K::Punct if s == "*" || s == "&" => ptr = true,
@@ -277,7 +277,7 @@ fn find_casts(t: &[Tok], sg: &[usize]) -> Vec<Cast> {
             continue;
         }
         let inner: Vec<&str> = sg[p + 1..c].iter().map(|&i| t[i].s.as_str()).collect();
-        let ptr = inner.last().map_or(false, |s| *s == "*");
+        let ptr = inner.last().is_some_and(|s| *s == "*");
         let base: Vec<&str> = inner.iter().copied().filter(|s| *s != "const" && *s != "volatile" && *s != "*").collect();
         let byte_ptr = ptr && inner.iter().filter(|s| **s == "*").count() == 1 && matches!(base.as_slice(), ["char"] | ["unsigned", "char"] | ["signed", "char"] | ["u8"] | ["s8"]);
         out.push(Cast { open: p, close: c, operand_end: operand_end(t, sg, c + 1), ptr, byte_ptr });
@@ -463,7 +463,7 @@ fn param_names(t: &[Tok], sg: &[usize], d: &Def) -> Vec<(usize, String)> {
         }
         if t[sg[p]].k == K::Id && depth == 0 && !is_builtin(&t[sg[p]].s) && t[sg[p]].s != "const" {
             // the declarator name follows the type: the last identifier not followed by `::`
-            if t.get(sg.get(p + 1).copied().unwrap_or(usize::MAX)).map_or(true, |n| n.s != "::") && p > a + 1 && t[sg[p - 1]].s != "::" {
+            if t.get(sg.get(p + 1).copied().unwrap_or(usize::MAX)).is_none_or(|n| n.s != "::") && p > a + 1 && t[sg[p - 1]].s != "::" {
                 last_id = Some(p);
             } else if p > a + 1 && t[sg[p - 1]].s != "::" {
                 last_id = None;
@@ -471,7 +471,7 @@ fn param_names(t: &[Tok], sg: &[usize], d: &Def) -> Vec<(usize, String)> {
         }
     }
     // a lone type (`void`, `CFoo&`) has no name: drop entries that are the first token
-    out.retain(|(p, n)| *p > a + 1 && !is_builtin(n) && n.chars().next().map_or(false, |c| c.is_ascii_lowercase() || c == '_'));
+    out.retain(|(p, n)| *p > a + 1 && !is_builtin(n) && n.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_'));
     out
 }
 
@@ -560,16 +560,15 @@ fn measure_text(code: &str) -> Naturalness {
         // offset arithmetic inside the operand, or a byte pointer the arithmetic is done on
         let mut hit = false;
         for q in c.close + 1..c.operand_end.min(sg.len()) {
-            if matches!(t[sg[q]].s.as_str(), "+" | "-") && sg.get(q + 1).map_or(false, |&i| t[i].k == K::Num) && !counted_nums.contains(&(q + 1)) {
+            if matches!(t[sg[q]].s.as_str(), "+" | "-") && sg.get(q + 1).is_some_and(|&i| t[i].k == K::Num) && !counted_nums.contains(&(q + 1)) {
                 counted_nums.insert(q + 1);
                 hit = true;
             }
         }
-        if c.byte_ptr && sg.get(c.operand_end).map_or(false, |&i| matches!(t[i].s.as_str(), "+" | "-")) && sg.get(c.operand_end + 1).map_or(false, |&i| t[i].k == K::Num) {
-            if counted_nums.insert(c.operand_end + 1) {
+        if c.byte_ptr && sg.get(c.operand_end).is_some_and(|&i| matches!(t[i].s.as_str(), "+" | "-")) && sg.get(c.operand_end + 1).is_some_and(|&i| t[i].k == K::Num)
+            && counted_nums.insert(c.operand_end + 1) {
                 hit = true;
             }
-        }
         // `*(T*)this`
         if c.open > 0 && t[sg[c.open - 1]].s == "*" && t[sg[c.close + 1]].s == "this" {
             hit = true;
@@ -589,17 +588,17 @@ fn measure_text(code: &str) -> Naturalness {
             K::Id => match s {
                 "static_cast" | "reinterpret_cast" | "const_cast" => n.named_casts += 1,
                 "goto" => n.gotos += 1,
-                "this" if sg.get(p + 1).map_or(false, |&j| t[j].s == "->") => n.this_arrows += 1,
+                "this" if sg.get(p + 1).is_some_and(|&j| t[j].s == "->") => n.this_arrows += 1,
                 _ if s.starts_with("__mwdec") => n.synth_types += 1,
                 _ if is_reg_name(s) && (p == 0 || !matches!(t[sg[p - 1]].s.as_str(), "." | "->" | "::")) => {
                     reg.insert(s);
                 }
                 _ => {}
             },
-            K::Punct if s == "*" && sg.get(p + 1).map_or(false, |&j| t[j].s == "&") && p > 0 && !matches!(t[sg[p - 1]].k, K::Id | K::Num) && !matches!(t[sg[p - 1]].s.as_str(), ")" | "]") => {
+            K::Punct if s == "*" && sg.get(p + 1).is_some_and(|&j| t[j].s == "&") && p > 0 && !matches!(t[sg[p - 1]].k, K::Id | K::Num) && !matches!(t[sg[p - 1]].s.as_str(), ")" | "]") => {
                 n.deref_addr += 1;
             }
-            K::Punct if s == "!" && sg.get(p + 1).map_or(false, |&j| t[j].s == "(") => {
+            K::Punct if s == "!" && sg.get(p + 1).is_some_and(|&j| t[j].s == "(") => {
                 if let Some(c) = close_of(&t, &sg, p + 1) {
                     if top_level_compare(&t, &sg, p + 2, c).is_some() {
                         n.neg_compares += 1;
@@ -616,7 +615,7 @@ fn measure_text(code: &str) -> Naturalness {
         // `extern "C" ... fn_X(` in the definition's declarator
         let decl_start = (0..d.params.0).rev().find(|&p| matches!(t[sg[p]].s.as_str(), ";" | "}")).map_or(0, |p| p + 1);
         let header: Vec<&str> = sg[decl_start..d.params.0].iter().map(|&i| t[i].s.as_str()).collect();
-        if header.contains(&"extern") && header.last().map_or(false, |s| s.starts_with("fn_")) {
+        if header.contains(&"extern") && header.last().is_some_and(|s| s.starts_with("fn_")) {
             n.extern_c += 1;
         }
         for (name, l) in locals(&t, &sg, &d) {
@@ -624,7 +623,7 @@ fn measure_text(code: &str) -> Naturalness {
             if l.init.is_some() && uses.len() == 1 {
                 n.single_use += 1;
             }
-            if l.init.is_none() && t[sg[l.pos + 1]].s == ";" && uses.first().map_or(false, |&u| is_plain_assign(&t, &sg, u)) {
+            if l.init.is_none() && t[sg[l.pos + 1]].s == ";" && uses.first().is_some_and(|&u| is_plain_assign(&t, &sg, u)) {
                 n.split_decls += 1;
             }
         }
@@ -635,7 +634,7 @@ fn measure_text(code: &str) -> Naturalness {
 
 /// `x = ...;` with `x` at a statement start (or a `for (` init).
 fn is_plain_assign(t: &[Tok], sg: &[usize], u: usize) -> bool {
-    u > 0 && sg.get(u + 1).map_or(false, |&i| t[i].s == "=") && (matches!(t[sg[u - 1]].s.as_str(), ";" | "{" | "}") || (t[sg[u - 1]].s == "(" && u > 1 && t[sg[u - 2]].s == "for"))
+    u > 0 && sg.get(u + 1).is_some_and(|&i| t[i].s == "=") && (matches!(t[sg[u - 1]].s.as_str(), ";" | "{" | "}") || (t[sg[u - 1]].s == "(" && u > 1 && t[sg[u - 2]].s == "for"))
 }
 
 /// `x = x op e;` statements: (position of the first `x`, operator position, end `;`).
@@ -660,12 +659,11 @@ fn self_op_sites(t: &[Tok], sg: &[usize], d: &Def) -> Vec<(usize, usize, usize)>
                 ")" | "]" if depth == 0 => break,
                 ")" | "]" => depth -= 1,
                 ";" if depth == 0 => break,
-                "+" | "-" | "*" | "/" | "|" | "&" | "^" | "<<" | ">>" | "%" | "?" | "&&" | "||" | "<" | ">" | "==" | "!=" | "<=" | ">=" if depth == 0 => {
+                "+" | "-" | "*" | "/" | "|" | "&" | "^" | "<<" | ">>" | "%" | "?" | "&&" | "||" | "<" | ">" | "==" | "!=" | "<=" | ">=" if depth == 0
                     // a unary minus right after the operator is fine
-                    if !(e == p + 4 && s == "-") {
+                    && !(e == p + 4 && s == "-") => {
                         ok = false;
                     }
-                }
                 _ => {}
             }
             e += 1;
@@ -753,27 +751,7 @@ fn name_from_call_arg(t: &[Tok], sg: &[usize], u: usize, db: &TypeDb, d: &Def, d
     }
     let callee = t[sg[q - 1]].s.as_str();
     // the callee's class: of the object (`obj.f(` / `obj->f(`), else the function's own class
-    let own = {
-        let decl_start = (0..d.params.0).rev().find(|&p| matches!(t[sg[p]].s.as_str(), ";" | "}")).map_or(0, |p| p + 1);
-        let q: Vec<&str> = sg[decl_start..d.params.0].iter().map(|&i| t[i].s.as_str()).collect();
-        q.iter().rposition(|s| *s == "::").map(|i| {
-            let mut a = i;
-            while a >= 2 && q[a - 2] == "::" {
-                a -= 2;
-            }
-            q[a.saturating_sub(1)..i].concat()
-        })
-    };
-    let field_type = |cls: &str, field: &str| -> Option<String> {
-        let mut c = mwdec_lift::sig::find_class(db, cls)?;
-        for _ in 0..8 {
-            if let Some(f) = c.fields.iter().find(|f| f.name == field) {
-                return mwdec_lift::ir::named(mwdec_lift::ir::strip_cv(&f.ty)).map(|s| s.to_string());
-            }
-            c = mwdec_lift::sig::find_class(db, &c.bases.first()?.name)?;
-        }
-        None
-    };
+    let own = own_class(t, sg, d);
     let class: Option<String> = if q >= 3 && matches!(t[sg[q - 2]].s.as_str(), "." | "->") && t[sg[q - 3]].k == K::Id {
         let obj = t[sg[q - 3]].s.as_str();
         let before = if q >= 4 { t[sg[q - 4]].s.as_str() } else { "" };
@@ -782,7 +760,7 @@ fn name_from_call_arg(t: &[Tok], sg: &[usize], u: usize, db: &TypeDb, d: &Def, d
         } else if let Some(l) = decls.get(obj) {
             Some(l.ty.replace("const ", "").trim_end_matches(['*', '&']).trim().to_string())
         } else {
-            own.as_deref().and_then(|o| field_type(o, obj))
+            own.as_deref().and_then(|o| member_type(db, o, obj))
         }
     } else if q >= 2 && matches!(t[sg[q - 2]].s.as_str(), "." | "->") {
         return None;
@@ -791,7 +769,7 @@ fn name_from_call_arg(t: &[Tok], sg: &[usize], u: usize, db: &TypeDb, d: &Def, d
     };
     let suffix = format!("::{callee}");
     let exact = class.as_ref().map(|c| format!("{c}::{callee}"));
-    let have_exact = exact.as_ref().map_or(false, |e| db.decls.contains_key(e));
+    let have_exact = exact.as_ref().is_some_and(|e| db.decls.contains_key(e));
     let mut names: HashSet<&str> = HashSet::new();
     for (k, ds) in &db.decls {
         if have_exact {
@@ -997,7 +975,7 @@ fn name_from_init(t: &[Tok], sg: &[usize], a: usize, b: usize) -> Option<String>
             _ => {}
         }
         if depth == 0 && t[sg[p]].k == K::Id && !KEYWORDS.contains(&s) {
-            let call = sg.get(p + 1).map_or(false, |&i| t[i].s == "(");
+            let call = sg.get(p + 1).is_some_and(|&i| t[i].s == "(");
             chain.push((s.to_string(), call));
         }
         if depth == 0 && matches!(s, "+" | "-" | "*" | "/" | "<" | ">" | "==" | "!=" | "&&" | "||" | "?" | "&" | "|" | "^" | "%" | "<<" | ">>") && p > a {
@@ -1076,7 +1054,7 @@ fn is_counter(t: &[Tok], sg: &[usize], d: &Def, name: &str, l: &Local) -> bool {
     let stepped = uses.iter().any(|&u| {
         let next = sg.get(u + 1).map(|&i| t[i].s.as_str()).unwrap_or("");
         let prev = t[sg[u - 1]].s.as_str();
-        matches!(next, "++" | "--" | "+=" | "-=") || matches!(prev, "++" | "--") || (next == "=" && sg.get(u + 2).map_or(false, |&i| t[i].s == name) && sg.get(u + 4).map_or(false, |&i| t[i].k == K::Num))
+        matches!(next, "++" | "--" | "+=" | "-=") || matches!(prev, "++" | "--") || (next == "=" && sg.get(u + 2).is_some_and(|&i| t[i].s == name) && sg.get(u + 4).is_some_and(|&i| t[i].k == K::Num))
     });
     in_cond && stepped
 }
@@ -1140,7 +1118,7 @@ fn rename_locals_db(code: &str, db: Option<&TypeDb>) -> String {
         let from_assign = || {
             let uses = ident_uses(&t, &sg, l.end, d.body.1, name);
             uses.iter().find_map(|&u| {
-                if sg.get(u + 1).map_or(false, |&i| t[i].s == "=") {
+                if sg.get(u + 1).is_some_and(|&i| t[i].s == "=") {
                     let mut e = u + 2;
                     let mut depth = 0;
                     while e < d.body.1 {
@@ -1184,7 +1162,7 @@ fn rename_locals_db(code: &str, db: Option<&TypeDb>) -> String {
                     });
                     member
                         .or_else(|| db.and_then(|db| uses.iter().skip(1).find_map(|&u| name_from_call_arg(&t, &sg, u, db, &d, &locs))))
-                        .or_else(|| uses.iter().any(|&u| t[sg[u - 1]].s == "return" && sg.get(u + 1).map_or(false, |&i| t[i].s == ";")).then(|| "result".to_string()))
+                        .or_else(|| uses.iter().any(|&u| t[sg[u - 1]].s == "return" && sg.get(u + 1).is_some_and(|&i| t[i].s == ";")).then(|| "result".to_string()))
                 })
                 .or_else(|| name_from_type(&l.ty))
                 .unwrap_or_else(|| if l.ty.contains('*') { "ptr".into() } else if l.ty.contains("float") || l.ty.contains("double") { "f".into() } else { "val".into() })
@@ -1228,10 +1206,10 @@ pub fn enum_names(code: &str, db: &TypeDb) -> String {
             "-" => (true, c.close + 2),
             _ => (false, c.close + 1),
         };
-        if c.operand_end != lit + 1 || t.get(sg.get(lit).copied().unwrap_or(usize::MAX)).map_or(true, |x| x.k != K::Num) {
+        if c.operand_end != lit + 1 || t.get(sg.get(lit).copied().unwrap_or(usize::MAX)).is_none_or(|x| x.k != K::Num) {
             continue;
         }
-        let txt = t[sg[lit]].s.trim_end_matches(|c: char| matches!(c, 'u' | 'U' | 'l' | 'L'));
+        let txt = t[sg[lit]].s.trim_end_matches(['u', 'U', 'l', 'L']);
         let v = if let Some(h) = txt.strip_prefix("0x").or_else(|| txt.strip_prefix("0X")) { i64::from_str_radix(h, 16).ok() } else { txt.parse::<i64>().ok() };
         let Some(mut v) = v else { continue };
         if neg {
@@ -1432,7 +1410,7 @@ pub fn candidates_db(code: &str, db: Option<&TypeDb>) -> Vec<String> {
             }
             (p > from).then(|| squash_tokens(&t, &sg, from, p) + "*")
         };
-        let newed = l.init.and_then(|(a, _)| new_class(a)).or_else(|| uses.iter().find_map(|&u| if sg.get(u + 1).map_or(false, |&i| t[i].s == "=") { new_class(u + 2) } else { None }));
+        let newed = l.init.and_then(|(a, _)| new_class(a)).or_else(|| uses.iter().find_map(|&u| if sg.get(u + 1).is_some_and(|&i| t[i].s == "=") { new_class(u + 2) } else { None }));
         let mut target: Option<String> = newed.clone();
         let mut cast_pos = vec![];
         let mut ok = !uses.is_empty();
@@ -1447,7 +1425,7 @@ pub fn candidates_db(code: &str, db: Option<&TypeDb>) -> Vec<String> {
                 if newed.is_some() && target.as_ref() != Some(&ty) {
                     continue;
                 }
-                if target.as_ref().map_or(false, |x| *x != ty) || !c.ptr || c.byte_ptr {
+                if target.as_ref().is_some_and(|x| *x != ty) || !c.ptr || c.byte_ptr {
                     ok = false;
                     break;
                 }
@@ -1563,7 +1541,7 @@ pub fn candidates_db(code: &str, db: Option<&TypeDb>) -> Vec<String> {
         for &u in &uses {
             if let Some(c) = casts.iter().find(|c| c.close + 1 == u && c.operand_end == u + 1 && !c.ptr) {
                 let ty = sg[c.open + 1..c.close].iter().map(|&i| t[i].s.as_str()).collect::<Vec<_>>().join(" ");
-                if conv.as_ref().map_or(false, |x| *x != ty) || !is_builtin(ty.split_whitespace().last().unwrap_or("")) || size_of(&ty, None) != size_of(&l.ty, None) || ty.contains("float") != l.ty.contains("float") {
+                if conv.as_ref().is_some_and(|x| *x != ty) || !is_builtin(ty.split_whitespace().last().unwrap_or("")) || size_of(&ty, None) != size_of(&l.ty, None) || ty.contains("float") != l.ty.contains("float") {
                     conv = None;
                     hits.clear();
                     break;
@@ -1603,7 +1581,7 @@ pub fn candidates_db(code: &str, db: Option<&TypeDb>) -> Vec<String> {
     keys.sort();
     // `*(T*)&x` without the cast is `x`
     let collapse = |nt: &mut Vec<Tok>, c: &Cast| {
-        if c.open > 0 && t[sg[c.open - 1]].s == "*" && t[sg[c.close + 1]].s == "&" && sg.get(c.close + 2).map_or(false, |&i| t[i].k == K::Id) && operand_end(&t, &sg, c.close + 2) == c.close + 3 {
+        if c.open > 0 && t[sg[c.open - 1]].s == "*" && t[sg[c.close + 1]].s == "&" && sg.get(c.close + 2).is_some_and(|&i| t[i].k == K::Id) && operand_end(&t, &sg, c.close + 2) == c.close + 3 {
             nt[sg[c.open - 1]].s.clear();
             nt[sg[c.close + 1]].s.clear();
         }
@@ -1696,7 +1674,7 @@ fn ptr_walks(t: &[Tok], sg: &[usize], d: &Def, db: Option<&TypeDb>) -> Vec<Strin
                         continue;
                     }
                     let e = ty.trim_end_matches('*').trim().to_string();
-                    if elem.as_ref().map_or(false, |x| *x != e) {
+                    if elem.as_ref().is_some_and(|x| *x != e) {
                         elem = None;
                         elem_casts.clear();
                         break;
@@ -1711,7 +1689,7 @@ fn ptr_walks(t: &[Tok], sg: &[usize], d: &Def, db: Option<&TypeDb>) -> Vec<Strin
         // steps: `name = <cast>(char*)name + N` / `name = (char*)name + N` up to `;` or `)`
         let mut steps = vec![];
         for &u in &uses {
-            if !sg.get(u + 1).map_or(false, |&i| t[i].s == "=") {
+            if sg.get(u + 1).is_none_or(|&i| t[i].s != "=") {
                 continue;
             }
             let mut e = u + 2;
@@ -1765,7 +1743,7 @@ fn ptr_walks(t: &[Tok], sg: &[usize], d: &Def, db: Option<&TypeDb>) -> Vec<Strin
                     // other assignments of byte-pointer values keep a conversion
                     let assigns: Vec<(usize, usize)> = uses
                         .iter()
-                        .filter(|&&u| sg.get(u + 1).map_or(false, |&i| t[i].s == "=") && !steps.iter().any(|s| s.0 == u + 2))
+                        .filter(|&&u| sg.get(u + 1).is_some_and(|&i| t[i].s == "=") && !steps.iter().any(|s| s.0 == u + 2))
                         .map(|&u| {
                             let mut e = u + 2;
                             let mut depth = 0;
@@ -1959,7 +1937,7 @@ impl crate::Em<'_> {
         // bitfields have no address
         let db = self.db?;
         if let Some(mwdec_lift::types::PathElem::Field(n, owner)) = path.last() {
-            if mwdec_lift::sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == *n)).map_or(true, |f| f.bitfield.is_some()) {
+            if mwdec_lift::sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == *n)).is_none_or(|f| f.bitfield.is_some()) {
                 return None;
             }
         }
@@ -1981,7 +1959,7 @@ impl crate::Em<'_> {
                     if !s.is_empty() {
                         s.push('.');
                     }
-                    let public = mwdec_lift::sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == *n)).map_or(false, |f| matches!(f.access, mwdec_core::Access::Public));
+                    let public = mwdec_lift::sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == *n)).is_some_and(|f| matches!(f.access, mwdec_core::Access::Public));
                     if public {
                         s.push_str(n);
                     } else {

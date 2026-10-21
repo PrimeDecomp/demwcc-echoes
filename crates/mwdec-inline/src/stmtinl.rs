@@ -70,7 +70,7 @@ fn zero_predicates(lib: &InlineLib) -> Vec<(usize, String, i32)> {
     let mut out = vec![];
     for (i, t) in lib.templates.iter().enumerate() {
         let (Some(c), Shape::Scalar(Expr::Binary { op: BinOp::Eq, l, r, .. })) = (&t.class, &t.shape) else { continue };
-        if t.holes.len() != 1 || !matches!(crate::util::strip(&t.sig.ret), Type::Bool) || r.as_int() != Some(0) {
+        if t.holes.len() != 1 || !matches!(mwdec_lift::strip_cv(&t.sig.ret), Type::Bool) || r.as_int() != Some(0) {
             continue;
         }
         if let Expr::Load { base, offset, .. } = &**l {
@@ -378,7 +378,7 @@ fn forward_calls(body: &mut Vec<Stmt>, env: &Env) -> usize {
                 }).collect()
             });
             let called = mwdec_lift::sig::split_scope(&sig.qualified_name).1.to_string();
-            if std::env::var_os("MWDI_TRACE_STMTINL").is_some() {
+            if env_flag!("MWDI_TRACE_STMTINL") {
                 eprintln!("stmtinl: call {called} on {cls}: {} forwarders {:?}", fwds.len(), fwds.iter().map(|(f, ch)| (f.sig.qualified_name.clone(), ch.iter().map(|c| c.0.clone()).collect::<Vec<_>>())).collect::<Vec<_>>());
             }
             let (tb, tk) = crate::addr::canon_ptr(this, env);
@@ -424,7 +424,7 @@ fn forward_calls(body: &mut Vec<Stmt>, env: &Env) -> usize {
 
 /// Both rewrites over a function body (after the template passes).
 pub fn apply(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
-    if std::env::var_os("MWDI_NO_STMTINL").is_some() {
+    if env_flag!("MWDI_NO_STMTINL") {
         return 0;
     }
     let defs = crate::matcher::build_defs(&ir.body, &ir.vars);

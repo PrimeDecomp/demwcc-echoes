@@ -4,27 +4,12 @@
 //! `regalloc::predict` (using the observed interference graph) and compare.
 //!
 //! usage: ra-fuzz [N=200] [seed=1] [--float] [-v]
+use mwdec_oracle::testgen::Rng;
 use mwdec_oracle::asm;
 use mwdec_oracle::compile::Compiler;
 use mwdec_oracle::regalloc::{self, Class, Node};
 use mwdec_oracle::webs::{self, reg_name, Origin};
 use std::collections::BTreeMap;
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-    fn chance(&mut self, pct: u64) -> bool {
-        self.below(100) < pct
-    }
-}
 
 #[derive(Clone, Debug)]
 enum Val {
@@ -189,7 +174,7 @@ fn main() -> anyhow::Result<()> {
     let float = args.iter().any(|a| a == "--float");
     let verbose = args.iter().any(|a| a == "-v");
     let comp = Compiler::default();
-    let mut r = Rng(0x9E3779B97F4A7C15 ^ seed.wrapping_mul(0x2545F4914F6CDD1D));
+    let mut r = Rng::seeded(seed);
     let (mut fn_ok, mut fn_bad, mut node_ok, mut node_bad, mut skipped) = (0, 0, 0, 0, 0);
     let (mut inf_found, mut inf_none, mut inf_cls_ok, mut inf_cls_bad, mut inf_ord_ok, mut inf_ord_bad) = (0, 0, 0, 0, 0, 0);
     for case in 0..n {

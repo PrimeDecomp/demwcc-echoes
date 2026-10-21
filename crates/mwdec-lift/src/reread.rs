@@ -224,12 +224,9 @@ fn forward_final_stores(b: &mut Vec<Stmt>, tail: bool) -> bool {
     let n = b.len();
     for j in 0..n {
         let t = tail && j + 1 == n;
-        match &mut b[j] {
-            Stmt::If { then, els, .. } => {
-                changed |= forward_final_stores(then, t);
-                changed |= forward_final_stores(els, t);
-            }
-            _ => {}
+        if let Stmt::If { then, els, .. } = &mut b[j] {
+            changed |= forward_final_stores(then, t);
+            changed |= forward_final_stores(els, t);
         }
     }
     if tail && n >= 2 {

@@ -143,7 +143,7 @@ fn compiler(a: &Args) -> Compiler {
 
 /// Object for webs/hints: an existing `.o`, or a compiled source file / `-e` snippet.
 fn load_obj(a: &Args) -> Result<asm::Obj> {
-    if a.inputs.first().map_or(false, |f| f.ends_with(".o")) {
+    if a.inputs.first().is_some_and(|f| f.ends_with(".o")) {
         return asm::parse(&std::fs::read(&a.inputs[0])?);
     }
     let src = match (&a.code, a.inputs.first()) {
@@ -237,7 +237,7 @@ fn main() -> Result<()> {
             let fname = a.fns.first().cloned().ok_or_else(|| anyhow!("sched: need --fn <mangled name or substring>"))?;
             let tobj = asm::parse(&std::fs::read(&tpath)?)?;
             let mut uns: Option<asm::Obj> = None;
-            let cobj = if a.inputs.first().map_or(false, |f| f.ends_with(".o")) {
+            let cobj = if a.inputs.first().is_some_and(|f| f.ends_with(".o")) {
                 asm::parse(&std::fs::read(&a.inputs[0])?)?
             } else {
                 let src = match (&a.code, a.inputs.first()) {
@@ -326,6 +326,7 @@ fn main() -> Result<()> {
                 (None, Some(f)) => std::fs::read_to_string(f)?,
                 _ => bail!("{}: need a file or -e CODE", a.cmd),
             };
+            #[allow(clippy::needless_update)] // mwcc-trace may add options
             let opts = TraceOptions {
                 inline: a.cmd == "inline",
                 coloring: a.cmd == "trace",
@@ -575,7 +576,7 @@ fn main() -> Result<()> {
         "memclass" => {
             // the scheduler alias model's class of every memory access (source compiled with -sym on
             // so the DWARF local extents are used, or an object)
-            let (obj, dwarf) = if a.inputs.first().map_or(false, |f| f.ends_with(".o")) {
+            let (obj, dwarf) = if a.inputs.first().is_some_and(|f| f.ends_with(".o")) {
                 (asm::parse(&std::fs::read(&a.inputs[0])?)?, true)
             } else {
                 let src = match (&a.code, a.inputs.first()) {
@@ -612,7 +613,7 @@ fn main() -> Result<()> {
         }
         "webs" => {
             // callee-saved webs of each function (from a source file/-e snippet, or an object with --obj)
-            let obj = if a.inputs.first().map_or(false, |f| f.ends_with(".o")) {
+            let obj = if a.inputs.first().is_some_and(|f| f.ends_with(".o")) {
                 asm::parse(&std::fs::read(&a.inputs[0])?)?
             } else {
                 let src = match (&a.code, a.inputs.first()) {

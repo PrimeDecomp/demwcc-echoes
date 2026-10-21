@@ -100,12 +100,12 @@ pub fn update_after_copy(body: &mut Vec<Stmt>, vars: &mut Vec<Var>) -> bool {
             continue;
         }
         // t is read again after v's assignment (at top level, outside nested blocks: kept simple)
-        let later: Vec<usize> = (i + 2..n).filter(|&k| stmt_uses(&body[k], t)).collect();
+        let later: Vec<usize> = (i + 2..n).filter(|&k| Stmt::uses_var(&body[k], t)).collect();
         if later.is_empty() || later.iter().any(|&k| !matches!(body[k], Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Return(_))) {
             continue;
         }
         // v isn't defined before i (it starts here)
-        if (0..=i).any(|k| stmt_uses(&body[k], v)) {
+        if (0..=i).any(|k| Stmt::uses_var(&body[k], v)) {
             continue;
         }
         let p = vars.len();
@@ -127,10 +127,4 @@ pub fn update_after_copy(body: &mut Vec<Stmt>, vars: &mut Vec<Var>) -> bool {
         return true;
     }
     false
-}
-
-fn stmt_uses(s: &Stmt, v: VarId) -> bool {
-    let mut found = false;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| found |= matches!(e, Expr::Var(x) if *x == v));
-    found
 }

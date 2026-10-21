@@ -504,7 +504,7 @@ impl<'a> Structurer<'a> {
                 if edges_of(self, x).is_none() || temp_defs(self, x).is_none() || !self.cfg.blocks[x].preds.iter().all(|p| set.contains(p)) {
                     continue;
                 }
-                if self.stack.last().map_or(false, |c| x == c.header || Some(x) == c.exit) {
+                if self.stack.last().is_some_and(|c| x == c.header || Some(x) == c.exit) {
                     continue;
                 }
                 set.push(x);
@@ -1046,10 +1046,10 @@ impl<'a> Structurer<'a> {
                 }
             }
             if !region.contains(&b) {
-                found |= bo.cond.as_ref().map_or(false, |c| c.uses_var(v));
+                found |= bo.cond.as_ref().is_some_and(|c| c.uses_var(v));
             }
-            found |= bo.ret.as_ref().map_or(false, |c| c.uses_var(v));
-            found |= bo.switch.as_ref().map_or(false, |c| c.uses_var(v));
+            found |= bo.ret.as_ref().is_some_and(|c| c.uses_var(v));
+            found |= bo.switch.as_ref().is_some_and(|c| c.uses_var(v));
             if found {
                 return true;
             }
@@ -1096,8 +1096,8 @@ impl<'a> Structurer<'a> {
                 && !self.loops.contains_key(&n)
                 && self.cfg.blocks[n].preds.iter().all(|p| chain.contains(p))
                 && !self.has_stmts(n)
-                && join.map_or(true, |j| self.cfg.postdominates(j, n))
-                && self.stack.last().map_or(true, |c| n != c.header && Some(n) != c.exit);
+                && join.is_none_or(|j| self.cfg.postdominates(j, n))
+                && self.stack.last().is_none_or(|c| n != c.header && Some(n) != c.exit);
             // the root of one of MWCC's compare trees starts a switch, not another `&&` term
             if !ok || self.confirmed_tree(n) {
                 break;
@@ -1321,7 +1321,7 @@ impl<'a> Structurer<'a> {
             None => test_exit(h, self).or_else(|| l.latches.iter().find_map(|&lt| test_exit(lt, self))),
         };
         if let Some(c) = first_exit {
-            let exit_returns = exit.map_or(true, |x| self.only_returns(x, &l.body));
+            let exit_returns = exit.is_none_or(|x| self.only_returns(x, &l.body));
             if Some(c) != exit && exit_returns && c != self.exit_node() {
                 let others_return = l.body.iter().all(|&b| self.cfg.blocks[b].succs.iter().all(|&s| l.body.contains(&s) || s == c || self.only_returns(s, &l.body)));
                 if others_return {
@@ -1365,7 +1365,7 @@ impl<'a> Structurer<'a> {
                 // next (a test that branches back to the body top is the body's own `if`)
                 let more = next != h
                     && next == f
-                    && self.cond_edges(next).map_or(false, |(t2, f2)| t2 == x || f2 == x)
+                    && self.cond_edges(next).is_some_and(|(t2, f2)| t2 == x || f2 == x)
                     && !self.has_stmts(next)
                     && self.cfg.blocks[next].preds.iter().all(|p| chain.contains(p))
                     && !self.loops.contains_key(&next);
@@ -1611,7 +1611,7 @@ impl<'a> Structurer<'a> {
                 continue;
             }
             let is_node = b == root
-                || (sel(b).map_or(false, |(y, _, _)| y == x) && self.cfg.blocks[b].preds.iter().all(|p| nodes.contains(p) || *p == root) && !self.emitted[b] && !self.loops.contains_key(&b));
+                || (sel(b).is_some_and(|(y, _, _)| y == x) && self.cfg.blocks[b].preds.iter().all(|p| nodes.contains(p) || *p == root) && !self.emitted[b] && !self.loops.contains_key(&b));
             // plain `b target` blocks inside the tree forward their set
             let is_jump = b != root && !self.has_stmts(b) && matches!(self.cfg.blocks[b].term, Term::Jump(_)) && self.cfg.blocks[b].preds.len() == 1 && nodes.contains(&self.cfg.blocks[b].preds[0]);
             if is_jump {
@@ -1636,7 +1636,8 @@ impl<'a> Structurer<'a> {
             };
             let (mut ts, mut fs) = (vec![], vec![]);
             for (lo, hi) in set {
-                for v in [(lo, hi)] {
+                {
+                    let v = (lo, hi);
                     let (a, z) = v;
                     let split = |pred: &dyn Fn(i64) -> bool, ts: &mut Vec<(i64, i64)>, fs: &mut Vec<(i64, i64)>| {
                         // ranges are split at k / k+1 boundaries only
@@ -1890,7 +1891,7 @@ impl<'a> Structurer<'a> {
         // a dead `b end` after the tree is an empty case body: empty cases before labels on the
         // default's body
         // (a void leaf's tree: a dead lone `blr`)
-        let dead_jump = join_off.map_or(false, |j| {
+        let dead_jump = join_off.is_some_and(|j| {
             self.cfg.blocks.iter().enumerate().any(|(bi, bb)| {
                 self.cfg.idom[bi] == usize::MAX
                     && bb.end == bb.start + 1
@@ -2136,7 +2137,7 @@ pub fn guard_not_swap(body: &mut Vec<Stmt>) {
     Stmt::for_each_block_mut(body, &mut |blk| {
         let real: Vec<usize> = (0..blk.len()).filter(|&i| !matches!(blk[i], Stmt::Label(_) | Stmt::Comment(_))).collect();
         for (k, &i) in real.iter().enumerate() {
-            let next_ret = real.get(k + 1).map_or(false, |&j| matches!(blk[j], Stmt::Return(Some(_))));
+            let next_ret = real.get(k + 1).is_some_and(|&j| matches!(blk[j], Stmt::Return(Some(_))));
             let Stmt::If { cond, then, els } = &mut blk[i] else { continue };
             let single_ret = |v: &Vec<Stmt>| {
                 let r: Vec<&Stmt> = v.iter().filter(|s| !matches!(s, Stmt::Label(_) | Stmt::Comment(_))).collect();

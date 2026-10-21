@@ -322,7 +322,7 @@ target .o --mwdec-obj--> ObjectFile/Function      context TU --mwdec-ctx--> Type
 4. `structure::Structurer::run`.
 5. Value clean-ups: `simplify::*` (logical values, bool vars, virtual delete checks, return
    values), `ctrloop::forward_constant_copies`, `wide::merge_halves` (64-bit pairs),
-   `idioms::drop_dead_stack_stores`, `varargs::recover`, `divmagic::fold` (magic-number
+   `idioms::drop_dead_stack_stores_kept`, `varargs::recover`, `divmagic::fold` (magic-number
    division), `reinline`.
 6. TypeDb-driven recovery (only with a TypeDb): `aggregates` (member-wise copies -> struct
    assignment, literal initializers), `arrays` (container members, absolute globals, element

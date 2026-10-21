@@ -3,11 +3,6 @@
 use anyhow::{Context, Result};
 use mwdec_core::*;
 
-/// Map an ELF `R_PPC_*` type number to our reloc kind.
-pub fn reloc_kind(r_type: u32) -> RelocKind {
-    RelocKind::of(r_type)
-}
-
 /// Short display name of a reloc kind (as in objdump / asm syntax).
 pub fn reloc_kind_name(k: RelocKind) -> String {
     match k {
@@ -87,7 +82,7 @@ pub fn disasm_word(word: u32, off: u32) -> String {
     if ins.is_direct_branch() {
         if let Some(dest) = ins.branch_dest(off) {
             // Replace the relative displacement with a function-relative target.
-            if let Some(pos) = text.rfind(|c: char| c == ' ' || c == ',') {
+            if let Some(pos) = text.rfind([' ', ',']) {
                 text.truncate(pos + 1);
                 text.push_str(&format!("0x{dest:x}"));
             }

@@ -57,25 +57,13 @@ impl Compiler {
     pub fn flags(&self) -> Vec<String> {
         let mut f = match &self.cflags {
             None => profile_flags(self.profile, &self.root),
-            Some(cf) => {
-                let mut out = Vec::with_capacity(cf.len());
-                let mut abs_next = false;
-                for a in cf {
-                    if abs_next && !std::path::Path::new(a).is_absolute() {
-                        out.push(self.root.join(a).to_string_lossy().replace('\\', "/"));
-                    } else {
-                        out.push(a.clone());
-                    }
-                    abs_next = a == "-i" || a == "-I" || a == "-ir";
-                }
-                out
-            }
+            Some(cf) => crate::flags::absolute_includes(cf, &self.root),
         };
         f.extend(self.extra.iter().cloned());
         f
     }
 
-    /// Compile `source` (whole TU text). `ext` is "cpp" or "c" (only affects the temp file name).
+    /// Compile `source` (whole TU text, written to a `.c` or `.cpp` file by the profile's language).
     pub fn compile(&self, source: &str) -> Result<CompileOutput> {
         std::fs::create_dir_all(&self.work).with_context(|| format!("creating {}", self.work.display()))?;
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -110,11 +98,7 @@ impl Compiler {
             return Ok(run.console);
         }
         let out = Command::new(&exe)
-            .args(self.flags())
-            .arg("-c")
-            .arg(src)
-            .arg("-o")
-            .arg(obj)
+            .args(&args)
             .current_dir(&self.work)
             .output()
             .with_context(|| format!("running {}", exe.display()))?;

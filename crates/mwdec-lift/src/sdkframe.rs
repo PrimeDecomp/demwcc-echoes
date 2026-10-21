@@ -56,13 +56,7 @@ fn global_root(e: &Expr) -> Option<&str> {
 /// globals and don't reassign the value's operands. Returns how many were folded.
 pub fn fold_volatile_locals(body: &mut Vec<Stmt>, vars: &[Var], limit: usize) -> usize {
     let mut nassign: HashMap<VarId, usize> = HashMap::new();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for st in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = st {
-                *nassign.entry(*v).or_default() += 1;
-            }
-        }
-    });
+    crate::inline::count_defs(body, &mut nassign);
     let mut uses: HashMap<VarId, usize> = HashMap::new();
     crate::inline::count_uses(body, &mut uses);
     let mut done = 0;

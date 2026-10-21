@@ -27,37 +27,6 @@ struct G {
     dtor_class: Option<String>,
 }
 
-fn each_stmt(body: &[Stmt], f: &mut dyn FnMut(&Stmt)) {
-    for s in body {
-        f(s);
-        match s {
-            Stmt::If { then, els, .. } => {
-                each_stmt(then, f);
-                each_stmt(els, f);
-            }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => each_stmt(body, f),
-            Stmt::For { init, step, body, .. } => {
-                each_stmt(init, f);
-                each_stmt(step, f);
-                each_stmt(body, f);
-            }
-            Stmt::Switch { cases, .. } => {
-                for c in cases {
-                    each_stmt(&c.body, f);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn strip_casts(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_casts(e),
-        e => e,
-    }
-}
-
 /// (global symbol, byte offset) a pointer expression points at.
 fn global_ptr(e: &Expr) -> Option<(String, Type, i32)> {
     match e {
@@ -162,13 +131,6 @@ impl<'a> Em<'a> {
                 Stmt::Expr(Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. }) if symbol == "__register_global_object" && matches!(args.first(), Some(Expr::Int { value: 0, .. })) => {}
                 Stmt::Expr(Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. }) if symbol == "__construct_array" && args.len() == 5 => {
                     let (g, gt, off) = global_ptr(&args[0])?;
-                    fn func_addr(e: &Expr) -> Option<&str> {
-                        match e {
-                            Expr::FuncAddr { symbol } => Some(symbol),
-                            Expr::Cast { e, .. } => func_addr(e),
-                            _ => None,
-                        }
-                    }
                     let cls = sig::sig_of(func_addr(&args[1])?, Some(db)).this_class?;
                     let Expr::Int { value: n, .. } = strip_casts(&args[4]) else { return None };
                     if off != 0 || *n <= 0 {
@@ -179,13 +141,6 @@ impl<'a> Em<'a> {
                 }
                 Stmt::Expr(Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. }) if symbol == "__register_global_object" => {
                     let (g, _, _) = args.first().and_then(global_ptr)?;
-                    fn func_addr(e: &Expr) -> Option<&str> {
-                        match e {
-                            Expr::FuncAddr { symbol } => Some(symbol),
-                            Expr::Cast { e, .. } => func_addr(e),
-                            _ => None,
-                        }
-                    }
                     let dc = args.get(1).and_then(func_addr).filter(|s| s.starts_with("__dt__")).and_then(|s| sig::sig_of(s, Some(db)).this_class);
                     let x = gs.iter_mut().find(|x| x.symbol == g)?;
                     x.registered = true;
@@ -308,13 +263,6 @@ impl<'a> Em<'a> {
                 _ => None,
             }
         }
-        fn func_addr(e: &Expr) -> Option<&str> {
-            match e {
-                Expr::FuncAddr { symbol } => Some(symbol),
-                Expr::Cast { e, .. } => func_addr(e),
-                _ => None,
-            }
-        }
         let mut pool: Option<String> = None;
         let mut objs: Vec<(i32, String)> = vec![];
         for s in &ir.body {
@@ -397,7 +345,7 @@ impl<'a> Em<'a> {
         let mut extent = 0i32;
         let unnamed = |s: &str| (s.starts_with("lbl_") || s.starts_with('@')) && !db.globals.contains_key(s);
         let mut ok = true;
-        each_stmt(&ir.body, &mut |st| match st {
+        Stmt::each(&ir.body, &mut |st| match st {
             Stmt::Assign { dst, src } => {
                 src.walk(&mut |x| {
                     if let Expr::Global { symbol, .. } = x {
@@ -405,7 +353,7 @@ impl<'a> Em<'a> {
                             if !lits.contains(symbol) {
                                 lits.push(symbol.clone());
                             }
-                        } else if !target.as_ref().is_some_and(|t| t == symbol) {
+                        } else if target.as_ref().is_none_or(|t| t != symbol) {
                             ok = false;
                         }
                     }
@@ -431,7 +379,7 @@ impl<'a> Em<'a> {
         let vals: Vec<i64> = lits
             .iter()
             .map(|l| {
-                let b = &ir.literal_bytes.iter().chain(ir.temp_bytes.iter()).find(|(n, _)| n == l).unwrap().1;
+                let b = &ir.literal_bytes.iter().chain(ir.temp_bytes.iter()).find(|(n, b)| n == l && b.len() == 4).unwrap().1;
                 i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64
             })
             .collect();
@@ -535,13 +483,12 @@ impl<'a> Em<'a> {
                     let Some((sub_cls, sub_off)) = sub else { continue };
                     let inner = toks[2..toks.len() - 1].join(" ");
                     let bargs: Vec<String> = sig::split_top(&inner, ',').into_iter().map(|a| a.trim().to_string()).collect();
-                    for (_, boffs) in self.member_ctor_d(&sub_cls, depth + 1).into_iter().filter(|(s, _)| s.params.len() == bargs.len()) {
+                    if let Some((_, boffs)) = self.member_ctor_d(&sub_cls, depth + 1).into_iter().find(|(s, _)| s.params.len() == bargs.len()) {
                         for (j, a) in bargs.iter().enumerate() {
                             if let Some(i) = names.iter().position(|n| n == a) {
                                 offs[i] = Some(sub_off + boffs[j]);
                             }
                         }
-                        break;
                     }
                 }
             }
@@ -573,14 +520,7 @@ impl<'a> Em<'a> {
         let mut has_loop = false;
         let mut regs: Vec<(String, String)> = vec![];
         let mut strs: Vec<Vec<u8>> = vec![];
-        fn func_addr(e: &Expr) -> Option<&str> {
-            match e {
-                Expr::FuncAddr { symbol } => Some(symbol),
-                Expr::Cast { e, .. } => func_addr(e),
-                _ => None,
-            }
-        }
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if matches!(s, Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. }) {
                 has_loop = true;
             }
@@ -735,8 +675,8 @@ public:
         let per = [3usize, 4]
             .into_iter()
             .filter(|_| float)
-            .find(|g| n % g == 0)
-            .or_else(|| (2..=MAX_INLINE_MEMBERS).rev().find(|g| n % g == 0))?;
+            .find(|g| n.is_multiple_of(*g))
+            .or_else(|| (2..=MAX_INLINE_MEMBERS).rev().find(|g| n.is_multiple_of(*g)))?;
         let members: Vec<String> = (0..per).map(|i| format!("{};", decl(&t, &format!("m{i}")))).collect();
         let params: Vec<String> = (0..per).map(|i| decl(&t, &format!("a{i}"))).collect();
         let inits: Vec<String> = (0..per).map(|i| format!("m{i}(a{i})")).collect();
@@ -875,7 +815,7 @@ public:
                 // an object with a destructor whose (inlined) constructor takes no arguments that
                 // we can see: default construction (its parameters may all have defaults, or
                 // the constructor is the implicit one)
-                if g.registered || db.decls.get(&format!("{base}::{last}")).is_none() {
+                if g.registered || !db.decls.contains_key(&format!("{base}::{last}")) {
                     return Some(wrap(format!("{};", decl(t, &name))));
                 }
                 None

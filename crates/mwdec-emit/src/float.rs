@@ -23,7 +23,7 @@ pub fn format_float(bits: u64, double: bool) -> String {
 
 fn shortest_f32(v: f32) -> String {
     let a = v.abs();
-    if a != 0.0 && (a < 1e-4 || a >= 1e9) {
+    if a != 0.0 && !(1e-4..1e9).contains(&a) {
         format!("{v:e}")
     } else {
         format!("{v}")
@@ -32,7 +32,7 @@ fn shortest_f32(v: f32) -> String {
 
 fn shortest_f64(v: f64) -> String {
     let a = v.abs();
-    if a != 0.0 && (a < 1e-4 || a >= 1e15) {
+    if a != 0.0 && !(1e-4..1e15).contains(&a) {
         format!("{v:e}")
     } else {
         format!("{v}")

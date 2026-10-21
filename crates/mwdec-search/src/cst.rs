@@ -222,6 +222,11 @@ pub fn apply(src: &str, edits: &[Edit]) -> Option<String> {
     Some(out)
 }
 
+/// [`apply`], kept only when the result parses with no more errors than `src` did (`c`, its tree).
+pub fn apply_checked(src: &str, c: &Cst, edits: &[Edit]) -> Option<String> {
+    apply(src, edits).filter(|s| Cst::parse(s).errors <= c.errors)
+}
+
 /// Whitespace/comment-insensitive normal form used for deduplication.
 pub fn normalize(src: &str) -> String {
     let b = src.as_bytes();

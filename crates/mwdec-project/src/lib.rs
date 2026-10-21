@@ -74,8 +74,8 @@ impl Project {
     pub fn load(root: &Path) -> Result<Project> {
         let od_path = root.join("objdiff.json");
         let od_text = std::fs::read_to_string(&od_path).with_context(|| format!("reading {}", od_path.display()))?;
-        let od: ObjdiffJson = serde_json::from_str(&od_text).context("parsing objdiff.json")?;
         let od_raw: serde_json::Value = serde_json::from_str(&od_text).context("parsing objdiff.json")?;
+        let od = <ObjdiffJson as serde::Deserialize>::deserialize(&od_raw).context("parsing objdiff.json")?;
         let objdiff_entries: HashMap<String, serde_json::Value> = od_raw["units"]
             .as_array()
             .map(|us| us.iter().filter_map(|u| Some((u["name"].as_str()?.to_string(), u.clone()))).collect())
@@ -241,15 +241,7 @@ pub fn size_bucket(size: u32) -> &'static str {
 
 pub const SIZE_BUCKETS: [&str; 7] = ["<=32", "<=64", "<=128", "<=256", "<=512", "<=1024", ">1024"];
 
-/// FNV-1a 32 of the unit name; `% 10 < 7` => "train", else "test".
-pub fn split_of(unit: &str) -> &'static str {
-    let mut h: u32 = 0x811c9dc5;
-    for b in unit.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    if h % 10 < 7 { "train" } else { "test" }
-}
+pub use mwdec_core::split_of;
 
 /// Eval-harness bookkeeping. NOT for use by the decompiler.
 pub mod harness {

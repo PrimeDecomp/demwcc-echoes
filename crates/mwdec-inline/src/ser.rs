@@ -583,7 +583,7 @@ pub fn minimal_object(obj: &mwdec_core::ObjectFile, f: &mwdec_core::Function, pr
             }
         };
         let sec = &mut sections[si];
-        while sec.bytes.len() % 8 != 0 {
+        while !sec.bytes.len().is_multiple_of(8) {
             sec.bytes.push(0);
         }
         let addr = sec.bytes.len() as u32;

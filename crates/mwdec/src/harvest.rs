@@ -315,7 +315,7 @@ pub fn cmd_harvest(root: &Path, work: &Path, a: HarvestArgs) -> Result<()> {
             return false;
         }
         if let Some(mb) = a.min_best {
-            if best.get(&k).map_or(true, |b| *b < mb) {
+            if best.get(&k).is_none_or(|b| *b < mb) {
                 return false;
             }
         }
@@ -750,10 +750,10 @@ pub fn cmd_repolish(root: &Path, work: &Path, dir: &Path, out: &Path, split: Opt
     for l in text.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
         let Some(unit) = v.get("unit").and_then(|x| x.as_str()).map(String::from) else { continue };
-        if split.map_or(false, |s| mwdec_project::split_of(&unit) != s) || unit_filter.map_or(false, |f| !unit.contains(f)) {
+        if split.is_some_and(|s| mwdec_project::split_of(&unit) != s) || unit_filter.is_some_and(|f| !unit.contains(f)) {
             continue;
         }
-        if limit.map_or(false, |k| n >= k) {
+        if limit.is_some_and(|k| n >= k) {
             break;
         }
         n += 1;
@@ -763,21 +763,20 @@ pub fn cmd_repolish(root: &Path, work: &Path, dir: &Path, out: &Path, split: Opt
     let (mut before_sum, mut after_sum) = (mwdec_emit::tidy::Naturalness::default(), mwdec_emit::tidy::Naturalness::default());
     let (mut done, mut changed, mut lost, mut clean_before, mut clean_after) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for (unit, rows) in by_unit {
-        let r = (|| -> Result<UnitInputs> {
+        let r = (|| -> Result<(UnitInputs, (ExternIndex, ExternIndex))> {
             let u = p.unit(&unit).ok_or_else(|| anyhow::anyhow!("unknown unit"))?;
             let (u, context) = unit_context(&p, u, &idx)?;
             let ext = externs_for(&p, &u.name);
             let cc = Compilers::new(&p.root, work, 3);
-            unit_inputs_with_context(&p, &u, &cc, &ext.0.objects, true, context, Some(&ext.0))
+            Ok((unit_inputs_with_context(&p, &u, &cc, &ext.0.objects, true, context, Some(&ext.0))?, ext))
         })();
-        let ui = match r {
-            Ok(ui) => ui,
+        let (ui, ext) = match r {
+            Ok(r) => r,
             Err(e) => {
                 eprintln!("{unit}: {e:#}");
                 continue;
             }
         };
-        let ext = externs_for(&p, &unit);
         for mut v in rows {
             let sym = v.get("symbol").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let src = v.get("source").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -786,7 +785,7 @@ pub fn cmd_repolish(root: &Path, work: &Path, dir: &Path, out: &Path, split: Opt
             let prover = crate::placeholders::UnitProver::new(&ui.mwcc, &ui.ctx, ui.db.as_ref());
             let scorer = Scorer::new(&ui.mwcc, &ui.ctx, Some(&ui.plain), &ti, f, Some(&ext.1), &sym).with_prover(Some(&prover));
             // the stored result must still be exact here (same context and compiler)
-            if !scorer.eval(&src).0.fitness().map_or(false, |x| x.exact) {
+            if !scorer.eval(&src).0.fitness().is_some_and(|x| x.exact) {
                 lost += 1;
                 eprintln!("{unit} {sym}: stored source not exact in this context; kept as is");
                 continue;

@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 fn member_access(e: &Expr) -> Option<(Expr, i32)> {
     match e {
-        Expr::Member { base, offset, ty } if matches!(ty, Type::Float { size: 4 }) => Some(((**base).clone(), *offset)),
-        Expr::Load { base, offset, ty } if matches!(ty, Type::Float { size: 4 }) => Some((Expr::Load { base: base.clone(), offset: 0, ty: Type::Unknown { size: 0 } }, *offset)),
+        Expr::Member { base, offset, ty: Type::Float { size: 4 } } => Some(((**base).clone(), *offset)),
+        Expr::Load { base, offset, ty: Type::Float { size: 4 } } => Some((Expr::Load { base: base.clone(), offset: 0, ty: Type::Unknown { size: 0 } }, *offset)),
         _ => None,
     }
 }

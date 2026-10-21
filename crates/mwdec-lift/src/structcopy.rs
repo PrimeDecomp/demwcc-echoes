@@ -118,7 +118,7 @@ fn constructed(e: &Expr) -> Option<(&Type, &[Expr])> {
 /// `T(o.a, o.b, o.c)` from every member of `T`, in order, of one object -> that object's `T`.
 fn construct_copies(e: &mut Expr, vars: &[Var], db: Option<&TypeDb>) -> usize {
     let mut n = 0;
-    for_each_subexpr_mut(e, &mut |x| {
+    e.rewrite(&mut |x| {
         let Some((class, args)) = constructed(x) else { return };
         let Some(members) = scalar_members(db, class) else { return };
         if members.len() != args.len() || members.len() < 2 {
@@ -190,21 +190,6 @@ fn handle_bump(s: &Stmt, rv: VarId, temps: &mut Vec<VarId>) -> bool {
         Stmt::Expr(Expr::IncDec { e, delta: 1, .. }) => through_temp(e, temps),
         _ => false,
     }
-}
-
-/// `a::b<c, d<e>>::f` -> `a::b::f`.
-fn strip_args(s: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0;
-    for ch in s.chars() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            _ if depth == 0 => out.push(ch),
-            _ => {}
-        }
-    }
-    out
 }
 
 fn count_mentions(body: &[Stmt], v: VarId) -> usize {
@@ -309,7 +294,7 @@ fn returned_copy_in(body: &mut Vec<Stmt>, rv: VarId, vars: &[Var], db: Option<&T
     let Some(cls) = named(&class) else { return false };
     let last_name = cls.rsplit("::").next().unwrap_or(cls).split('<').next().unwrap_or(cls);
     // (a template's constructors are declared on the template: `rstl::pair::pair`)
-    let generic = strip_args(cls);
+    let generic = crate::sig::strip_tmpl(cls);
     let has_ctor = [format!("{cls}::{last_name}"), format!("{generic}::{last_name}")]
         .iter()
         .any(|k| db.decls.get(k).is_some_and(|ds| ds.iter().any(|d| d.params.len() == members.len())));
@@ -449,7 +434,7 @@ fn word_runs(b: &mut Vec<Stmt>, uses: &std::collections::HashMap<VarId, usize>, 
         }
         let mut offs: Vec<i32> = run.iter().map(|r| r.1).collect();
         offs.sort();
-        let contiguous = offs.windows(2).all(|w| w[1] == w[0] + 4) && offs.len() >= 2 && (!ll || offs.len() % 2 == 0);
+        let contiguous = offs.windows(2).all(|w| w[1] == w[0] + 4) && offs.len() >= 2 && (!ll || offs.len().is_multiple_of(2));
         // the statements of the run hold only its copies and their temporaries
         let first_stmt = run.iter().map(|(k, _, td)| td.unwrap_or(*k)).min().unwrap();
         let members = (first_stmt..j).all(|k| run.iter().any(|(r, _, td)| *r == k || *td == Some(k)));
@@ -604,37 +589,4 @@ fn stmt_exprs(s: &mut Stmt, f: &mut dyn FnMut(&mut Expr)) {
         Stmt::Return(Some(e)) => f(e),
         _ => {}
     }
-}
-
-/// Post-order over `e` and its subexpressions.
-fn for_each_subexpr_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
-    match e {
-        Expr::AddrOf(x) | Expr::Unary { e: x, .. } | Expr::Cast { e: x, .. } | Expr::IncDec { e: x, .. } => for_each_subexpr_mut(x, f),
-        Expr::Load { base, .. } | Expr::Member { base, .. } | Expr::BitField { base, .. } => for_each_subexpr_mut(base, f),
-        Expr::Index { base, index, .. } => {
-            for_each_subexpr_mut(base, f);
-            for_each_subexpr_mut(index, f);
-        }
-        Expr::Binary { l, r, .. } => {
-            for_each_subexpr_mut(l, f);
-            for_each_subexpr_mut(r, f);
-        }
-        Expr::Ternary { c, t, f: g, .. } => {
-            for_each_subexpr_mut(c, f);
-            for_each_subexpr_mut(t, f);
-            for_each_subexpr_mut(g, f);
-        }
-        Expr::Call { callee, args, .. } => {
-            match callee {
-                Callee::Method { this, .. } | Callee::Virtual { this, .. } => for_each_subexpr_mut(this, f),
-                Callee::Indirect(x) => for_each_subexpr_mut(x, f),
-                Callee::Direct { .. } => {}
-            }
-            args.iter_mut().for_each(|a| for_each_subexpr_mut(a, f));
-        }
-        Expr::New { placement, args, .. } => placement.iter_mut().chain(args.iter_mut()).for_each(|a| for_each_subexpr_mut(a, f)),
-        Expr::Construct { args, .. } => args.iter_mut().for_each(|a| for_each_subexpr_mut(a, f)),
-        _ => {}
-    }
-    f(e);
 }

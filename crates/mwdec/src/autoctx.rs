@@ -73,7 +73,7 @@ fn defined_types(text: &str) -> Vec<String> {
             let semi = after.find(';');
             let paren = after.find('(');
             if let Some(br) = brace {
-                if semi.map_or(true, |s| br < s) && paren.map_or(true, |p| br < p) {
+                if semi.is_none_or(|s| br < s) && paren.is_none_or(|p| br < p) {
                     out.push(name);
                 }
             }

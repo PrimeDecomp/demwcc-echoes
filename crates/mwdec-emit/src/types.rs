@@ -28,13 +28,9 @@ pub fn decl(t: &Type, name: &str) -> String {
         let (ptrs, rest) = d.split_at(n);
         if rest.is_empty() {
             format!("{base}{ptrs}")
-        } else if rest.starts_with("const") {
-            format!("{base}{ptrs} {rest}")
         } else {
             format!("{base}{ptrs} {rest}")
         }
-    } else if d.starts_with('(') {
-        format!("{base} {d}")
     } else {
         format!("{base} {d}")
     }

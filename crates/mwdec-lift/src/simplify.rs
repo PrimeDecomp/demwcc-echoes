@@ -14,16 +14,8 @@ fn is_boolish(e: &Expr, vars: &[Var]) -> bool {
     }
 }
 
-/// One bottom-up rewrite step.
-fn uncast(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => uncast(e),
-        e => e,
-    }
-}
-
 fn is_neg_of(e: &Expr, x: &Expr) -> bool {
-    matches!(uncast(e), Expr::Unary { op: UnOp::Neg, e: y, .. } if uncast(y) == uncast(x))
+    matches!(strip_casts(e), Expr::Unary { op: UnOp::Neg, e: y, .. } if strip_casts(y) == strip_casts(x))
 }
 
 /// MWCC's branchless 0/1 materialisations (value-context comparisons) back to comparisons; with
@@ -39,7 +31,7 @@ fn bool_idiom(e: &Expr, vars: &[Var]) -> Option<Expr> {
 }
 
 fn ne_operand(q: &Expr, vars: &[Var]) -> Expr {
-    let a = uncast(q).clone();
+    let a = strip_casts(q).clone();
     if matches!(strip_cv(&ty_of(&a, vars)), Type::Bool) {
         Expr::Cast { ty: Type::Int { size: 4, signed: true }, e: Box::new(a) }
     } else {
@@ -52,19 +44,19 @@ fn bool_idiom_bit(e: &Expr, vars: &[Var]) -> Option<Expr> {
     if r.as_int() != Some(31) {
         return None;
     }
-    match uncast(l) {
+    match strip_casts(l) {
         // (-a | a) >> 31  ==  a != 0 (a bool keeps its widening: the source normalised it
         // explicitly, `b != 0`, which `b` alone wouldn't compile to)
         Expr::Binary { op: BinOp::Or, l: p, r: q, .. } if is_neg_of(p, q) => Some(Expr::cmp(BinOp::Ne, ne_operand(q, vars), Expr::int(0))),
         Expr::Binary { op: BinOp::Or, l: p, r: q, .. } if is_neg_of(q, p) => Some(Expr::cmp(BinOp::Ne, ne_operand(p, vars), Expr::int(0))),
         // (-a & ~a) >> 31  ==  a > 0
         Expr::Binary { op: BinOp::And, l: p, r: q, .. } if is_neg_of(p, q) => None,
-        Expr::Binary { op: BinOp::And, l: p, r: q, .. } => match uncast(q) {
-            Expr::Unary { op: UnOp::BitNot, e: a, .. } if is_neg_of(p, a) => Some(Expr::cmp(BinOp::Gt, uncast(a).clone(), Expr::int(0))),
+        Expr::Binary { op: BinOp::And, l: p, r: q, .. } => match strip_casts(q) {
+            Expr::Unary { op: UnOp::BitNot, e: a, .. } if is_neg_of(p, a) => Some(Expr::cmp(BinOp::Gt, strip_casts(a).clone(), Expr::int(0))),
             _ => None,
         },
         // ((b - a) | (a - b)) >> 31  ==  a != b
-        Expr::Binary { op: BinOp::Or, l: p, r: q, .. } => match (uncast(p), uncast(q)) {
+        Expr::Binary { op: BinOp::Or, l: p, r: q, .. } => match (strip_casts(p), strip_casts(q)) {
             (Expr::Binary { op: BinOp::Sub, l: b1, r: a1, .. }, Expr::Binary { op: BinOp::Sub, l: a2, r: b2, .. }) if a1 == a2 && b1 == b2 => {
                 Some(Expr::cmp(BinOp::Ne, (**a1).clone(), (**b1).clone()))
             }
@@ -72,25 +64,25 @@ fn bool_idiom_bit(e: &Expr, vars: &[Var]) -> Option<Expr> {
         },
         // ((a | ~b) - ((a - b) >> 1)) >> 31  ==  b <= a (unsigned)
         Expr::Binary { op: BinOp::Sub, l: p, r: q, .. }
-            if matches!((uncast(p), uncast(q)),
+            if matches!((strip_casts(p), strip_casts(q)),
                 (Expr::Binary { op: BinOp::Or, r: nb, .. }, Expr::Binary { op: BinOp::Shr, r: one, .. })
-                    if one.as_int() == Some(1) && matches!(uncast(nb), Expr::Unary { op: UnOp::BitNot, .. })) =>
+                    if one.as_int() == Some(1) && matches!(strip_casts(nb), Expr::Unary { op: UnOp::BitNot, .. })) =>
         {
-            let (Expr::Binary { l: a1, r: nb, .. }, Expr::Binary { l: d, .. }) = (uncast(p), uncast(q)) else { return None };
-            let Expr::Unary { e: b1, .. } = uncast(nb) else { return None };
-            match uncast(d) {
-                Expr::Binary { op: BinOp::Sub, l: a2, r: b2, .. } if uncast(a2) == uncast(a1) && uncast(b2) == uncast(b1) => {
-                    Some(Expr::cmp(BinOp::Le, Expr::cast(t_u32(), uncast(b1).clone()), Expr::cast(t_u32(), uncast(a1).clone())))
+            let (Expr::Binary { l: a1, r: nb, .. }, Expr::Binary { l: d, .. }) = (strip_casts(p), strip_casts(q)) else { return None };
+            let Expr::Unary { e: b1, .. } = strip_casts(nb) else { return None };
+            match strip_casts(d) {
+                Expr::Binary { op: BinOp::Sub, l: a2, r: b2, .. } if strip_casts(a2) == strip_casts(a1) && strip_casts(b2) == strip_casts(b1) => {
+                    Some(Expr::cmp(BinOp::Le, Expr::cast(t_u32(), strip_casts(b1).clone()), Expr::cast(t_u32(), strip_casts(a1).clone())))
                 }
                 _ => None,
             }
         }
         // ((b ^ a) >>s 1) - ((b ^ a) & b) >> 31  ==  a < b (signed)
-        Expr::Binary { op: BinOp::Sub, l: p, r: q, .. } => match (uncast(p), uncast(q)) {
-            (Expr::Binary { op: BinOp::Shr, l: x1, r: one, .. }, Expr::Binary { op: BinOp::And, l: x2, r: b, .. }) if one.as_int() == Some(1) && uncast(x1) == uncast(x2) => {
-                if let Expr::Binary { op: BinOp::Xor, l: b1, r: a1, .. } = uncast(x1) {
-                    if uncast(b1) == uncast(b) {
-                        return Some(Expr::cmp(BinOp::Lt, uncast(a1).clone(), uncast(b1).clone()));
+        Expr::Binary { op: BinOp::Sub, l: p, r: q, .. } => match (strip_casts(p), strip_casts(q)) {
+            (Expr::Binary { op: BinOp::Shr, l: x1, r: one, .. }, Expr::Binary { op: BinOp::And, l: x2, r: b, .. }) if one.as_int() == Some(1) && strip_casts(x1) == strip_casts(x2) => {
+                if let Expr::Binary { op: BinOp::Xor, l: b1, r: a1, .. } = strip_casts(x1) {
+                    if strip_casts(b1) == strip_casts(b) {
+                        return Some(Expr::cmp(BinOp::Lt, strip_casts(a1).clone(), strip_casts(b1).clone()));
                     }
                 }
                 None
@@ -98,10 +90,10 @@ fn bool_idiom_bit(e: &Expr, vars: &[Var]) -> Option<Expr> {
             _ => None,
         },
         // (b << cntlzw(b ^ a)) >> 31  ==  a < b (unsigned)
-        Expr::Binary { op: BinOp::Shl, l: b, r: c, .. } => match uncast(c) {
-            Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. } if symbol == "__cntlzw" => match args.first().map(uncast) {
-                Some(Expr::Binary { op: BinOp::Xor, l: b1, r: a1, .. }) if uncast(b1) == uncast(b) => {
-                    Some(Expr::cmp(BinOp::Lt, Expr::cast(t_u32(), uncast(a1).clone()), Expr::cast(t_u32(), uncast(b1).clone())))
+        Expr::Binary { op: BinOp::Shl, l: b, r: c, .. } => match strip_casts(c) {
+            Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. } if symbol == "__cntlzw" => match args.first().map(strip_casts) {
+                Some(Expr::Binary { op: BinOp::Xor, l: b1, r: a1, .. }) if strip_casts(b1) == strip_casts(b) => {
+                    Some(Expr::cmp(BinOp::Lt, Expr::cast(t_u32(), strip_casts(a1).clone()), Expr::cast(t_u32(), strip_casts(b1).clone())))
                 }
                 _ => None,
             },
@@ -187,11 +179,11 @@ fn simp(e: &mut Expr, vars: &[Var]) {
     // (x + ((u32)x >> 31)) >> 1  ==  x / 2 (signed; `srwi 31 ; add ; srawi 1`)
     if let Expr::Binary { op: BinOp::Shr, l, r, .. } = e {
         if r.as_int() == Some(1) {
-            if let Expr::Binary { op: BinOp::Add, l: a, r: b, .. } = uncast(l) {
-                let sign_of = |s: &Expr, x: &Expr| matches!(uncast(s), Expr::Binary { op: BinOp::Shr, l: y, r: k, .. } if k.as_int() == Some(31) && uncast(y) == uncast(x));
+            if let Expr::Binary { op: BinOp::Add, l: a, r: b, .. } = strip_casts(l) {
+                let sign_of = |s: &Expr, x: &Expr| matches!(strip_casts(s), Expr::Binary { op: BinOp::Shr, l: y, r: k, .. } if k.as_int() == Some(31) && strip_casts(y) == strip_casts(x));
                 let x = if sign_of(a, b) { Some(b) } else if sign_of(b, a) { Some(a) } else { None };
                 if let Some(x) = x {
-                    let xv = uncast(x).clone();
+                    let xv = strip_casts(x).clone();
                     let signed_x = matches!(is_signed(&ty_of(&xv, vars)), Some(true) | None);
                     if signed_x {
                         let ty = t_s32();
@@ -212,7 +204,7 @@ fn simp(e: &mut Expr, vars: &[Var]) {
     // (a >> 31) ^ 1  ==  a >= 0
     if let Expr::Binary { op: BinOp::Xor, l, r, .. } = e {
         if r.as_int() == Some(1) {
-            if let Expr::Binary { op: BinOp::Shr, l: a, r: s, .. } = uncast(l) {
+            if let Expr::Binary { op: BinOp::Shr, l: a, r: s, .. } = strip_casts(l) {
                 if s.as_int() == Some(31) {
                     // word-size casts go, a sign extension (`(signed char)x`, `extsb`) stays
                     let mut x: &Expr = a;
@@ -276,14 +268,14 @@ fn simp(e: &mut Expr, vars: &[Var]) {
             if let Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. } = inner {
                 if symbol == "__cntlzw" && args.len() == 1 {
                     // value-context `a == b` is `subf ; cntlzw ; srwi 5`
-                    if let Expr::Binary { op: BinOp::Sub, l: x, r: y, .. } = uncast(&args[0]) {
+                    if let Expr::Binary { op: BinOp::Sub, l: x, r: y, .. } = strip_casts(&args[0]) {
                         if y.as_int().is_none() {
                             *e = Expr::cmp(BinOp::Eq, (**y).clone(), (**x).clone());
                             return;
                         }
                     }
                     // `a == K` is `addi -K ; cntlzw ; srwi 5`
-                    if let Expr::Binary { op: op @ (BinOp::Add | BinOp::Sub), l: x, r: k, .. } = uncast(&args[0]) {
+                    if let Expr::Binary { op: op @ (BinOp::Add | BinOp::Sub), l: x, r: k, .. } = strip_casts(&args[0]) {
                         if let Some(k) = k.as_int().filter(|k| *k != 0 && (-0x8000..=0x8000).contains(k)) {
                             let k = if *op == BinOp::Add { -k } else { k };
                             *e = Expr::cmp(BinOp::Eq, (**x).clone(), Expr::int(k));
@@ -305,7 +297,7 @@ fn simp(e: &mut Expr, vars: &[Var]) {
         // cast to the type it already has (in C terms too: `int & 0x7f800000` is int in C even
         // when the IR typed it unsigned)
         let c_agrees = match ty {
-            Type::Int { size: 4, signed } => crate::translate::c_unsigned(inner, vars) == !*signed,
+            Type::Int { size: 4, signed } => crate::translate::c_unsigned(inner, vars) != *signed,
             _ => true,
         };
         if ty_of(inner, vars) == *ty && !matches!(ty, Type::Unknown { .. }) && c_agrees {
@@ -328,12 +320,9 @@ fn simp(e: &mut Expr, vars: &[Var]) {
         }
         // casting an int literal
         if let Expr::Int { value, .. } = **inner {
-            match ty {
-                Type::Int { size: 4, signed } => {
-                    *e = Expr::Int { value: if *signed { value as i32 as i64 } else { value as u32 as i64 }, ty: ty.clone() };
-                    return;
-                }
-                _ => {}
+            if let Type::Int { size: 4, signed } = ty {
+                *e = Expr::Int { value: if *signed { value as i32 as i64 } else { value as u32 as i64 }, ty: ty.clone() };
+                return;
             }
         }
     }
@@ -361,12 +350,11 @@ fn simp(e: &mut Expr, vars: &[Var]) {
             }
         }
         // (bool cmp) == 0 handled; LogAnd with constant true
-        if *op == BinOp::LogAnd {
-            if matches!(**l, Expr::Int { value: 1, ty: Type::Bool }) {
+        if *op == BinOp::LogAnd
+            && matches!(**l, Expr::Int { value: 1, ty: Type::Bool }) {
                 *e = (**r).clone();
                 return;
             }
-        }
     }
     if let Expr::Unary { op: UnOp::Not, e: inner, .. } = e {
         match &**inner {
@@ -616,7 +604,7 @@ pub fn name_vars(body: &[Stmt], vars: &mut [Var]) {
 /// Element step of `x = x + k` style updates of variable `x` (pointer: k bytes / pointee size).
 fn step_of(src: &Expr, x: VarId, vars: &[Var], db: Option<&mwdec_core::TypeDb>) -> Option<i64> {
     let xt = vars[x].ty.clone();
-    let is_x = |e: &Expr| matches!(uncast(e), Expr::Var(v) if *v == x);
+    let is_x = |e: &Expr| matches!(strip_casts(e), Expr::Var(v) if *v == x);
     let bytes = match src {
         Expr::Binary { op: BinOp::Add, l, r, .. } if is_x(l) => r.as_int()?,
         Expr::Binary { op: BinOp::Sub, l, r, .. } if is_x(l) => -r.as_int()?,
@@ -642,16 +630,6 @@ fn step_of(src: &Expr, x: VarId, vars: &[Var], db: Option<&mwdec_core::TypeDb>) 
     } else {
         None
     }
-}
-
-fn mentions_var(s: &Stmt, v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1;
-        }
-    });
-    n
 }
 
 /// Does `s` read `v` before any branch of its own (not in a nested body, a loop condition, the
@@ -707,7 +685,7 @@ pub fn form_incdec_with(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool], db
                 let (t, x) = (*t, *x);
                 if temp(t) && !temp(x) && uses.get(&t) == Some(&1) && e.uses_var(x) && !e.has_call() {
                     if let Some(d) = step_of(step, x, vars, db) {
-                        if mentions_var(&b[i + 2], t) == 1 && reads_unconditionally(&b[i + 2], t) && mentions_var(&b[i + 2], x) == 0 {
+                        if Stmt::count_var(&b[i + 2], t) == 1 && reads_unconditionally(&b[i + 2], t) && Stmt::count_var(&b[i + 2], x) == 0 {
                             // (or the step as a statement of its own after the use)
                             if matches!(&b[i + 2], Stmt::Expr(_) | Stmt::Assign { .. }) && crate::variants::alt(crate::variants::INCDEC_STEP_AFTER) {
                                 let mut s = b[i + 2].clone();
@@ -754,7 +732,7 @@ pub fn form_incdec_with(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool], db
                     _ => None,
                 };
                 if let Some(d) = d.filter(|_| mem && temp(t) && l2 == lv && uses.get(&t) == Some(&2)) {
-                    if mentions_var(&b[i + 2], t) == 1 && reads_unconditionally(&b[i + 2], t) {
+                    if Stmt::count_var(&b[i + 2], t) == 1 && reads_unconditionally(&b[i + 2], t) {
                         let inc = Expr::IncDec { e: Box::new(lv.clone()), delta: d, post: true };
                         let mut s = b[i + 2].clone();
                         subst_var(&mut s, t, &inc);
@@ -775,7 +753,7 @@ pub fn form_incdec_with(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool], db
                     };
                     if let Some(d) = d {
                         let inc = Expr::IncDec { e: Box::new(l.clone()), delta: d, post: false };
-                        if mentions_var(&b[i + 2], t) == 1 && reads_unconditionally(&b[i + 2], t) {
+                        if Stmt::count_var(&b[i + 2], t) == 1 && reads_unconditionally(&b[i + 2], t) {
                             let mut s = b[i + 2].clone();
                             subst_var(&mut s, t, &inc);
                             b[i + 2] = s;
@@ -812,13 +790,13 @@ pub fn inline_ternary_results(body: &mut Vec<Stmt>) {
                 // statement right before (nothing else reassigns v in between)
                 let prev_def = (0..i).rev().find_map(|k| match &b[k] {
                     Stmt::Assign { dst: Expr::Var(x), src } if *x == v => Some(!src.uses_var(v)),
-                    s if matches!(s, Stmt::Assign { .. } | Stmt::Expr(_)) => None,
+                    Stmt::Assign { .. } | Stmt::Expr(_) => None,
                     _ => Some(false),
                 }) == Some(true);
-                let later: usize = b[i + 1..].iter().map(|s| mentions_var(s, v)).sum();
+                let later: usize = b[i + 1..].iter().map(|s| Stmt::count_var(s, v)).sum();
                 let _ = &total;
                 let only_here = later == 1 && !is_used_outside_list(&total, v, b);
-                if only_here && mentions_var(&b[i + 1], v) == 1 && (in_t == 0 || prev_def) {
+                if only_here && Stmt::count_var(&b[i + 1], v) == 1 && (in_t == 0 || prev_def) {
                     let t = t.clone();
                     subst_var(&mut b[i + 1], v, &t);
                     b.remove(i);
@@ -852,7 +830,7 @@ pub fn fold_ternary_constants(body: &mut Vec<Stmt>) {
             };
             // the next statement that mentions v must be the ternary re-assignment
             let mut j = i + 1;
-            while j < b.len() && mentions_var(&b[j], v) == 0 {
+            while j < b.len() && Stmt::count_var(&b[j], v) == 0 {
                 j += 1;
             }
             let ok = matches!(b.get(j), Some(Stmt::Assign { dst: Expr::Var(x), src: Expr::Ternary { .. } }) if *x == v)
@@ -889,7 +867,7 @@ fn guard_returns_to_nested(body: &mut Vec<Stmt>, vars: &[Var]) {
             let ok = (|| {
                 let Stmt::DoWhile { body: lb, cond } = &b[j] else { return None };
                 let c = ctr_loop_var(cond)?;
-                if !vars[c].name.starts_with("var_ctr") || !lb.last().map_or(false, |s| is_ctr_dec(s, c)) {
+                if !vars[c].name.starts_with("var_ctr") || !lb.last().is_some_and(|s| is_ctr_dec(s, c)) {
                     return None;
                 }
                 let Stmt::If { cond: g, then, els } = &b[j - 1] else { return None };
@@ -941,7 +919,7 @@ fn is_ctr_dec(s: &Stmt, ctr: VarId) -> bool {
 
 fn ctr_loop_var(cond: &Expr) -> Option<VarId> {
     match cond {
-        Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) => match uncast(l) {
+        Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) => match strip_casts(l) {
             Expr::Var(v) => Some(*v),
             _ => None,
         },
@@ -964,7 +942,7 @@ pub fn recover_ctr_loops(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mu
         while j < b.len() {
             let ctr = match &b[j] {
                 Stmt::DoWhile { body: lb, cond } => match ctr_loop_var(cond) {
-                    Some(c) if is_ctr(c) && lb.last().map_or(false, |s| is_ctr_dec(s, c)) => Some(c),
+                    Some(c) if is_ctr(c) && lb.last().is_some_and(|s| is_ctr_dec(s, c)) => Some(c),
                     _ => None,
                 },
                 _ => None,
@@ -1021,7 +999,7 @@ fn strip_ctr_latch_path(b: &mut Vec<Stmt>, ctr: VarId, exit: &Stmt) -> Option<Ve
     let n = b.len();
     if n >= 2 && is_ctr_dec(&b[n - 2], ctr) {
         if let Stmt::If { cond, then, els } = &b[n - 1] {
-            let tests_zero = matches!(cond, Expr::Binary { op: BinOp::Eq, l, r, .. } if r.as_int() == Some(0) && matches!(uncast(l), Expr::Var(v) if *v == ctr));
+            let tests_zero = matches!(cond, Expr::Binary { op: BinOp::Eq, l, r, .. } if r.as_int() == Some(0) && matches!(strip_casts(l), Expr::Var(v) if *v == ctr));
             let ok_els = els.is_empty() || els.as_slice() == [Stmt::Continue];
             if tests_zero && then.as_slice() == std::slice::from_ref(exit) && ok_els {
                 b.truncate(n - 2);
@@ -1085,14 +1063,14 @@ fn count_assigns(b: &[Stmt], v: VarId, n: &mut usize) {
 /// A CTR count `(X + (k-1)) >> log2(k)` (unsigned) is the trip count of `for (i = 0; i < X; i += k)`:
 /// (X, k).
 fn stepped_count(n: &Expr) -> Option<(Expr, i64)> {
-    let Expr::Binary { op: BinOp::Shr, l, r, .. } = uncast(n) else { return None };
+    let Expr::Binary { op: BinOp::Shr, l, r, .. } = strip_casts(n) else { return None };
     let sh = r.as_int().filter(|s| (1..=4).contains(s))?;
     if !unsigned_cast(l) {
         return None;
     }
-    let Expr::Binary { op: BinOp::Add, l: x, r: c, .. } = uncast(l) else { return None };
+    let Expr::Binary { op: BinOp::Add, l: x, r: c, .. } = strip_casts(l) else { return None };
     let k = 1i64 << sh;
-    (c.as_int() == Some(k - 1)).then(|| (uncast(x).clone(), k))
+    (c.as_int() == Some(k - 1)).then(|| (strip_casts(x).clone(), k))
 }
 
 fn recover_counted_ctr_loops(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<bool>) {
@@ -1132,8 +1110,8 @@ fn recover_counted_ctr_loops(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp:
                 };
                 // (a signed `n == 0` guard may be the test of `i != n` (variant); else `i < n` unsigned)
                 let signed = match &g {
-                    Expr::Binary { op: BinOp::Le, l, r, .. } if r.as_int() == Some(0) && uncast(l) == uncast(&n) => Some((!unsigned_cast(l), false)),
-                    Expr::Binary { op: BinOp::Eq, l, r, .. } if r.as_int() == Some(0) && uncast(l) == uncast(&n) => Some(if !unsigned_cast(l) && crate::variants::alt(crate::variants::LOOP_NE_COUNT) { (true, true) } else { (false, false) }),
+                    Expr::Binary { op: BinOp::Le, l, r, .. } if r.as_int() == Some(0) && strip_casts(l) == strip_casts(&n) => Some((!unsigned_cast(l), false)),
+                    Expr::Binary { op: BinOp::Eq, l, r, .. } if r.as_int() == Some(0) && strip_casts(l) == strip_casts(&n) => Some(if !unsigned_cast(l) && crate::variants::alt(crate::variants::LOOP_NE_COUNT) { (true, true) } else { (false, false) }),
                     _ => None,
                 };
                 let Some((signed, ne)) = signed else {
@@ -1171,7 +1149,7 @@ fn recover_counted_ctr_loops(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp:
                         let mut n = 0;
                         count_assigns(&lb2, v, &mut n);
                         if let (Some(ini), 1) = (init, n) {
-                            if ini != ip && b[ini + 1..j - 1].iter().all(|s| mentions_var(s, v) == 0) {
+                            if ini != ip && b[ini + 1..j - 1].iter().all(|s| Stmt::count_var(s, v) == 0) {
                                 if let Some(l) = list_at(&mut lb2, &path) {
                                     l.pop();
                                 }
@@ -1237,7 +1215,7 @@ fn recover_counted_ctr_loops(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp:
                 if els.is_empty() && then.len() == 1 {
                     if let Stmt::DoWhile { body: lb, cond: lc } = &then[0] {
                         if let Some(c) = ctr_loop_var(lc) {
-                            if vars[c].name.starts_with("var_ctr") && lb.last().map_or(false, |x| is_ctr_dec(x, c)) && uses.get(&c) == Some(&2) {
+                            if vars[c].name.starts_with("var_ctr") && lb.last().is_some_and(|x| is_ctr_dec(x, c)) && uses.get(&c) == Some(&2) {
                                 // init `ctr = n` earlier in this list, guard on n
                                 let init = b[..k].iter().rev().find_map(|x| match x {
                                     Stmt::Assign { dst: Expr::Var(y), src } if *y == c => Some(src.clone()),
@@ -1251,8 +1229,8 @@ fn recover_counted_ctr_loops(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp:
                                         _ => (n, 1),
                                     };
                                     let signed = match cond {
-                                        Expr::Binary { op: BinOp::Gt, l, r, .. } if r.as_int() == Some(0) && uncast(l) == uncast(&n) => Some((!unsigned_cast(l), false)),
-                                        Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) && uncast(l) == uncast(&n) => Some(if !unsigned_cast(l) && step == 1 && crate::variants::alt(crate::variants::LOOP_NE_COUNT) { (true, true) } else { (false, false) }),
+                                        Expr::Binary { op: BinOp::Gt, l, r, .. } if r.as_int() == Some(0) && strip_casts(l) == strip_casts(&n) => Some((!unsigned_cast(l), false)),
+                                        Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) && strip_casts(l) == strip_casts(&n) => Some(if !unsigned_cast(l) && step == 1 && crate::variants::alt(crate::variants::LOOP_NE_COUNT) { (true, true) } else { (false, false) }),
                                         _ => None,
                                     };
                                     if let Some((sg, ne)) = signed {
@@ -1331,14 +1309,14 @@ pub fn fold_virtual_delete_checks(body: &mut Vec<Stmt>) {
             if !crate::sig::is_dtor(sg) || args.len() != 1 || args[0].as_int() != Some(1) {
                 continue;
             }
-            let tests = |c: &Expr| match uncast(c) {
-                Expr::Binary { op: BinOp::Ne, l, r, .. } => uncast(l) == uncast(this) && r.as_int() == Some(0),
-                c => c == uncast(this),
+            let tests = |c: &Expr| match strip_casts(c) {
+                Expr::Binary { op: BinOp::Ne, l, r, .. } => strip_casts(l) == strip_casts(this) && r.as_int() == Some(0),
+                c => c == strip_casts(this),
             };
             if tests(cond) {
                 let call = (*call).clone();
                 *s = Stmt::Expr(call);
-            } else if let Expr::Binary { op: BinOp::LogAnd, l, r, .. } = uncast(cond) {
+            } else if let Expr::Binary { op: BinOp::LogAnd, l, r, .. } = strip_casts(cond) {
                 // `if (x && p) delete p;`: the last test is the delete-expression's own
                 if tests(r) {
                     let l = (**l).clone();
@@ -1363,12 +1341,12 @@ pub fn fold_double_delete_checks(body: &mut Vec<Stmt>) {
             if symbol != "__delete" || args.len() != 1 {
                 continue;
             }
-            let p = uncast(&args[0]).clone();
-            let tests_p = |c: &Expr| match uncast(c) {
-                Expr::Binary { op: BinOp::Ne, l, r, .. } => *uncast(l) == p && r.as_int() == Some(0),
+            let p = strip_casts(&args[0]).clone();
+            let tests_p = |c: &Expr| match strip_casts(c) {
+                Expr::Binary { op: BinOp::Ne, l, r, .. } => *strip_casts(l) == p && r.as_int() == Some(0),
                 c => *c == p,
             };
-            let new = match uncast(cond) {
+            let new = match strip_casts(cond) {
                 Expr::Binary { op: BinOp::LogAnd, l, r, .. } if tests_p(l) && tests_p(r) => Some((**l).clone()),
                 _ => None,
             };
@@ -1478,16 +1456,6 @@ fn is_logical(e: &Expr) -> bool {
     matches!(e, Expr::Binary { op: BinOp::LogAnd | BinOp::LogOr, .. })
 }
 
-fn mentions(s: &Stmt, v: VarId) -> bool {
-    let mut found = false;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            found = true;
-        }
-    });
-    found
-}
-
 fn fold_logical_list(b: &mut Vec<Stmt>, vars: &[Var]) -> bool {
     let mut changed = false;
     let mut i = 0;
@@ -1511,14 +1479,14 @@ fn fold_logical_list(b: &mut Vec<Stmt>, vars: &[Var]) -> bool {
             continue;
         };
         // the zeroing store: the last statement before that mentions v
-        let Some(j) = (0..i).rev().find(|&j| mentions(&b[j], v)) else {
+        let Some(j) = (0..i).rev().find(|&j| Stmt::uses_var(&b[j], v)) else {
             i += 1;
             continue;
         };
         let zero = |e: &Expr, upto: usize, b: &Vec<Stmt>| -> bool {
             match e {
                 Expr::Int { value: 0, .. } => true,
-                Expr::Var(w) => match (0..upto).rev().find(|&k| mentions(&b[k], *w)) {
+                Expr::Var(w) => match (0..upto).rev().find(|&k| Stmt::uses_var(&b[k], *w)) {
                     Some(k) => matches!(&b[k], Stmt::Assign { dst: Expr::Var(x), src: Expr::Int { value: 0, .. } } if x == w),
                     None => false,
                 },
@@ -1548,7 +1516,7 @@ fn fold_logical_list(b: &mut Vec<Stmt>, vars: &[Var]) -> bool {
             let dead = match &b[k] {
                 Stmt::Assign { dst: Expr::Var(w), src: Expr::Int { value: 0, .. } } if matches!(vars[*w].kind, VarKind::Local) => {
                     let w = *w;
-                    match (k + 1..b.len()).find(|&n| mentions(&b[n], w)) {
+                    match (k + 1..b.len()).find(|&n| Stmt::uses_var(&b[n], w)) {
                         Some(n) => matches!(&b[n], Stmt::Assign { dst: Expr::Var(x), src } if *x == w && !src.uses_var(w)) && n <= i,
                         None => false,
                     }

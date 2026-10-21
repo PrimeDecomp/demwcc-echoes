@@ -317,13 +317,13 @@ fn real_main() -> Result<()> {
         Cmd::BenchCompile { unit, n, jobs } => cmd_bench_compile(&root, &work, &unit, n, jobs),
         Cmd::Match { unit, symbol, budget_secs, init, max_compiles, workers, seed, no_db, verbose, out, no_locate, disable_ops } => search_cmds::cmd_match(
             &root,
-            &cli.work.clone().unwrap_or_else(|| search_cmds::search_work()),
+            &cli.work.clone().unwrap_or_else(search_cmds::search_work),
             search_cmds::MatchArgs { unit, symbol, budget_secs, init, max_compiles, workers, seed, no_db, verbose, out, no_locate, disable_ops },
         ),
         Cmd::InlineWhy { unit, symbol, list, out } => inline_why::cmd_inline_why(&root, &work, unit, symbol, list, out),
         Cmd::DraftServer { no_db } => draft_server::serve(&root, &cli.work.clone().unwrap_or_else(search_cmds::search_work), no_db),
         Cmd::Harvest { max_size, min_size, budget_secs, max_compiles, jobs, workers, unit, symbol, out_dir, limit, tag, scope, report, no_supervise, seed, list, summary, min_best } => {
-            let out_dir = out_dir.unwrap_or_else(|| harvest::harvest_dir());
+            let out_dir = out_dir.unwrap_or_else(harvest::harvest_dir);
             if summary {
                 return harvest::summary(&out_dir);
             }
@@ -334,7 +334,7 @@ fn real_main() -> Result<()> {
             )
         }
         Cmd::Repolish { dir, out, split, limit, unit } => {
-            let dir = dir.unwrap_or_else(|| harvest::harvest_dir());
+            let dir = dir.unwrap_or_else(harvest::harvest_dir);
             let out = out.unwrap_or_else(|| dir.join("exact_polished.jsonl"));
             harvest::cmd_repolish(&root, &cli.work.clone().unwrap_or_else(|| harvest::harvest_dir().join("work")), &dir, &out, split.as_deref(), limit, unit.as_deref())
         }
@@ -627,7 +627,7 @@ fn cmd_dataset(root: &Path, stats: bool, split: Option<&str>) -> Result<()> {
     let p = load_project(root)?;
     let ds = p.dataset()?;
     if !stats {
-        for e in ds.iter().filter(|e| split.map_or(true, |s| e.split == s)) {
+        for e in ds.iter().filter(|e| split.is_none_or(|s| e.split == s)) {
             println!("{}\t{}\t{}\t{}", e.split, e.size, e.unit, e.symbol);
         }
         return Ok(());
@@ -676,7 +676,7 @@ fn cmd_ctx_check(root: &Path, work: &Path, filter: Option<&str>, jobs: usize) ->
     let units: Vec<&Unit> = p
         .units
         .iter()
-        .filter(|u| u.source.is_some() && !u.cflags.is_empty() && filter.map_or(true, |f| u.name.contains(f)))
+        .filter(|u| u.source.is_some() && !u.cflags.is_empty() && filter.is_none_or(|f| u.name.contains(f)))
         .collect();
     let t = Instant::now();
     let bad: Vec<(String, String)> = units
@@ -694,7 +694,7 @@ fn cmd_ctx_check(root: &Path, work: &Path, filter: Option<&str>, jobs: usize) ->
                 }
                 Err(e) => {
                     let msg = e.messages();
-                    let line = msg.lines().filter(|l| l.contains("Error") || l.contains("cannot be opened") || l.contains("not found")).last()
+                    let line = msg.lines().rfind(|l| l.contains("Error") || l.contains("cannot be opened") || l.contains("not found"))
                         .or_else(|| msg.lines().find(|l| !l.trim().is_empty())).unwrap_or("").trim().to_string();
                     let detail = msg.lines().skip_while(|l| !l.contains("Error")).nth(1).unwrap_or("").trim().to_string();
                     Some((u.name.clone(), format!("{} {line} {detail}", if matches!(e, mwdec_mwcc::MwccError::Crash { .. }) { "CRASH" } else { "" })))

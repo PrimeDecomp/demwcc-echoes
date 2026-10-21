@@ -307,7 +307,8 @@ pub fn strip_names_exact(l: &[String]) -> Vec<String> {
 /// Like [`strip_names_exact`] but compiler-local labels (`@123`) renumbered by first appearance, so
 /// listings that differ only in literal-pool label ids compare equal.
 pub fn strip_names(l: &[String]) -> Vec<String> {
-    let re = Regex::new(r"@(\d+)").unwrap();
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| Regex::new(r"@(\d+)").unwrap());
+    let re = &*RE;
     let mut map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     strip_names_exact(l)
         .into_iter()
@@ -324,10 +325,13 @@ pub fn strip_names(l: &[String]) -> Vec<String> {
 
 /// Drop prologue/epilogue lines (frame setup, LR save/restore, callee-saved saves/restores).
 pub fn strip_frame(l: &[String]) -> Vec<String> {
-    let re = Regex::new(
-        r"^(stwu r1, |mflr r0$|mtlr r0$|addi r1, r1, |(stw|lwz) r0, 0x[0-9a-f]+\(r1\)$|(stw|lwz) r(1[4-9]|2[0-9]|3[01]), 0x[0-9a-f]+\(r1\)$|(stmw|lmw) r[0-9]+, |(stfd|lfd) f(1[4-9]|2[0-9]|3[01]), 0x[0-9a-f]+\(r1\)$|psq_(st|l) f(1[4-9]|2[0-9]|3[01]), 0x[0-9a-f]+\(r1\))",
-    )
-    .unwrap();
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
+            r"^(stwu r1, |mflr r0$|mtlr r0$|addi r1, r1, |(stw|lwz) r0, 0x[0-9a-f]+\(r1\)$|(stw|lwz) r(1[4-9]|2[0-9]|3[01]), 0x[0-9a-f]+\(r1\)$|(stmw|lmw) r[0-9]+, |(stfd|lfd) f(1[4-9]|2[0-9]|3[01]), 0x[0-9a-f]+\(r1\)$|psq_(st|l) f(1[4-9]|2[0-9]|3[01]), 0x[0-9a-f]+\(r1\))",
+        )
+        .unwrap()
+    });
+    let re = &*RE;
     l.iter().filter(|x| !re.is_match(x.trim())).cloned().collect()
 }
 

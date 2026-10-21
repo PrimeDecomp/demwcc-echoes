@@ -99,7 +99,7 @@ fn loose_key(text: &str) -> String {
         .split(", ")
         .map(|o| o.trim().trim_end_matches('=').to_string())
         .filter(|o| {
-            let reg = |p: &str| o.strip_prefix(p).map_or(false, |n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            let reg = |p: &str| o.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
             !(reg("r") || reg("f") || reg("cr") || reg("spr") || o.starts_with('<') || o.is_empty())
         })
         .collect();
@@ -383,7 +383,7 @@ fn entry_region(obj: &Obj, f: &Func, entry: bool) -> Vec<EntryIns> {
             }
             continue;
         }
-        let ops: Vec<&str> = text.splitn(2, ' ').nth(1).unwrap_or("").split(", ").map(|o| o.trim()).collect();
+        let ops: Vec<&str> = text.split_once(' ').map(|x| x.1).unwrap_or("").split(", ").map(|o| o.trim()).collect();
         let save = frame.contains(&off) && matches!(m.as_str(), "stw" | "stfd" | "stmw" | "psq_st");
         let mut param_load = None;
         let is_load = m.starts_with('l') && !matches!(m.as_str(), "li" | "lis");

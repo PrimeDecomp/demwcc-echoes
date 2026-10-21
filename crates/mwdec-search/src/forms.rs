@@ -7,22 +7,11 @@
 //! preserving rewrites inside the function body; the strict comparator is the judge.
 use crate::cst::{normalize, strip_parens, Cst, Edit};
 use crate::func::{self, infer_type, is_loop, is_scalar_type};
-use crate::ops::{and_operand, braced, cond_expr, ends_with_return, has_kind, in_cond_context, indent_of, inner_block, mentions, names_declared, negate, ptext, ptext_bin, pure, remove_stmt, replace_stmt_many, single, stmts_of, ternary_branch, uses_of, M};
+use crate::ops::{and_operand, braced, case_stmts, ends_in_jump, strip_parens_node, cond_expr, ends_with_return, has_kind, in_cond_context, indent_of, inner_block, mentions, names_declared, negate, ptext, ptext_bin, pure, remove_stmt, replace_stmt_many, single, stmts_of, ternary_branch, uses_of, M};
 
 /// Text of statement `s` with node `n` (inside it) replaced by `with`.
 fn text_with(c: &Cst, s: usize, n: usize, with: &str) -> String {
     format!("{}{with}{}", &c.src[c.nodes[s].start..c.nodes[n].start], &c.src[c.nodes[n].end..c.nodes[s].end])
-}
-
-/// `n` without enclosing parentheses (the node itself otherwise).
-fn unparen(c: &Cst, mut n: usize) -> usize {
-    while c.kind(n) == "parenthesized_expression" {
-        match c.named(n).first() {
-            Some(&i) => n = i,
-            None => break,
-        }
-    }
-    n
 }
 
 /// Condition text for an `if (...)` or a ternary condition (no outer parentheses).
@@ -32,7 +21,7 @@ fn cond_text(c: &Cst, e: usize) -> String {
 
 /// Ternary condition operand: parenthesized when it is an assignment, comma or ternary itself.
 fn ternary_cond(c: &Cst, e: usize) -> String {
-    let e = unparen(c, e);
+    let e = strip_parens_node(c, e);
     match c.kind(e) {
         "conditional_expression" | "assignment_expression" | "comma_expression" => format!("({})", c.text(e)),
         _ => c.text(e).to_string(),
@@ -137,7 +126,7 @@ pub fn op_tail_dup(m: &mut M) -> Option<Vec<Edit>> {
     let mut cands: Vec<(usize, u8)> = Vec::new();
     for s in m.of_kind(&["if_statement"]) {
         let (Some(ce), Some(cons), Some(y)) = (cond_expr(c, s), c.child(s, "consequence"), else_body(c, s)) else { continue };
-        let ce0 = unparen(c, ce);
+        let ce0 = strip_parens_node(c, ce);
         if c.kind(ce0) == "binary_expression" {
             match c.op(ce0) {
                 Some("&&") if duplicable(c, y) => cands.push((s, 0)),
@@ -160,7 +149,7 @@ pub fn op_tail_dup(m: &mut M) -> Option<Vec<Edit>> {
         }
     }
     let (s, kind) = m.pick(&cands)?;
-    let ce = unparen(c, cond_expr(c, s)?);
+    let ce = strip_parens_node(c, cond_expr(c, s)?);
     let cons = c.child(s, "consequence")?;
     let y = else_body(c, s)?;
     let ind = indent_of(c, s);
@@ -187,7 +176,7 @@ pub fn op_tail_dup(m: &mut M) -> Option<Vec<Edit>> {
                 "conditional_expression" | "assignment_expression" | "comma_expression" => format!("({})", c.text(n)),
                 _ => c.text(n).to_string(),
             };
-            format!("if ({} || {}) {} else {}", or(ce), or(unparen(c, b)), braced(c, cons), braced(c, else_body(c, inner)?))
+            format!("if ({} || {}) {} else {}", or(ce), or(strip_parens_node(c, b)), braced(c, cons), braced(c, else_body(c, inner)?))
         }
         _ => {
             let in_block = c.parent(s).is_some_and(|p| c.kind(p) == "compound_statement");
@@ -208,7 +197,7 @@ pub fn op_tail_dup(m: &mut M) -> Option<Vec<Edit>> {
 /// types) a member or method declared `bool` everywhere it is declared.
 fn is_bool_expr(m: &M, n: usize) -> bool {
     let c = m.cst;
-    let n = unparen(c, n);
+    let n = strip_parens_node(c, n);
     if infer_type(c, m.info, n).is_some_and(|t| t == "bool") && c.kind(n) == "identifier" {
         return true;
     }
@@ -260,7 +249,7 @@ pub fn op_bool_compare(m: &mut M) -> Option<Vec<Edit>> {
                     continue;
                 }
                 let alt = if m.rng.chance(0.5) { "== false" } else { "!= true" };
-                let t = format!("{} {alt}", ptext_bin(c, unparen(c, a)));
+                let t = format!("{} {alt}", ptext_bin(c, strip_parens_node(c, a)));
                 let wrap = c.parent(n).is_some_and(|p| !matches!(c.kind(p), "condition_clause" | "parenthesized_expression"));
                 cands.push((n, if wrap { format!("({t})") } else { t }));
             }
@@ -268,7 +257,7 @@ pub fn op_bool_compare(m: &mut M) -> Option<Vec<Edit>> {
                 if !in_cond_context(c, n) || c.parent(n).is_some_and(|p| c.kind(p) == "unary_expression") || !is_bool_expr(m, n) {
                     continue;
                 }
-                let t = format!("{} == true", ptext_bin(c, unparen(c, n)));
+                let t = format!("{} == true", ptext_bin(c, strip_parens_node(c, n)));
                 let wrap = c.parent(n).is_some_and(|p| matches!(c.kind(p), "binary_expression" | "conditional_expression"));
                 cands.push((n, if wrap { format!("({t})") } else { t }));
             }
@@ -315,21 +304,6 @@ pub fn op_case_return(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit::replace(c, s, to)])
 }
 
-/// Statements of a case after its label.
-fn case_stmts(c: &Cst, case: usize) -> Vec<usize> {
-    let v = c.child(case, "value");
-    c.named(case).into_iter().filter(|&s| Some(s) != v && func::is_stmt(c.kind(s))).collect()
-}
-
-/// Control leaves the statement list (it doesn't fall into the next case).
-fn ends_in_jump(c: &Cst, s: usize) -> bool {
-    match c.kind(s) {
-        "return_statement" | "break_statement" | "continue_statement" | "goto_statement" => true,
-        "compound_statement" => stmts_of(c, s).last().is_some_and(|&l| ends_in_jump(c, l)),
-        _ => false,
-    }
-}
-
 /// In a switch over an enum without `default`, an empty `case K: break;` for an enumerator not
 /// present yet (it changes the compare tree / jump table, not what runs), or such an empty case
 /// removed. The enum is the context's enum holding every present label.
@@ -347,7 +321,7 @@ pub fn op_case_insert(m: &mut M) -> Option<Vec<Edit>> {
         let labels: Option<Vec<(String, String)>> = cases
             .iter()
             .map(|&x| {
-                let v = unparen(c, c.child(x, "value")?);
+                let v = strip_parens_node(c, c.child(x, "value")?);
                 let t = c.text(v);
                 match c.kind(v) {
                     "identifier" => Some((t.to_string(), String::new())),
@@ -464,7 +438,7 @@ fn step_of(c: &Cst, s: usize) -> Option<(usize, &'static str)> {
     if c.kind(s) != "expression_statement" {
         return None;
     }
-    let e = unparen(c, *c.named(s).first()?);
+    let e = strip_parens_node(c, *c.named(s).first()?);
     let one = |n: usize| c.text(n).trim() == "1";
     let (lv, inc) = match c.kind(e) {
         "update_expression" => (c.child(e, "argument")?, c.op(e)? == "++"),
@@ -490,15 +464,15 @@ fn step_of(c: &Cst, s: usize) -> Option<(usize, &'static str)> {
 
 /// The comparison of an if condition and the side holding exactly `x` (the other not mentioning it).
 fn compare_side(c: &Cst, s: usize, x: &str) -> Option<usize> {
-    let ce = unparen(c, cond_expr(c, s)?);
+    let ce = strip_parens_node(c, cond_expr(c, s)?);
     if c.kind(ce) != "binary_expression" || !matches!(c.op(ce), Some("==" | "!=" | "<" | ">" | "<=" | ">=")) {
         return None;
     }
     let (l, r) = (c.child(ce, "left")?, c.child(ce, "right")?);
     let root: String = x.chars().take_while(|ch| ch.is_alphanumeric() || *ch == '_').collect();
     for (a, b) in [(l, r), (r, l)] {
-        if normalize(c.text(unparen(c, a))) == x && pure(c, b) && !mentions(c, b, &root) {
-            return Some(unparen(c, a));
+        if normalize(c.text(strip_parens_node(c, a))) == x && pure(c, b) && !mentions(c, b, &root) {
+            return Some(strip_parens_node(c, a));
         }
     }
     None
@@ -522,12 +496,12 @@ pub fn op_incr_test(m: &mut M) -> Option<Vec<Edit>> {
     }
     let mut back = Vec::new();
     for s in m.of_kind(&["if_statement"]) {
-        let Some(ce) = cond_expr(c, s).map(|e| unparen(c, e)) else { continue };
+        let Some(ce) = cond_expr(c, s).map(|e| strip_parens_node(c, e)) else { continue };
         if c.kind(ce) != "binary_expression" {
             continue;
         }
         for side in [c.child(ce, "left"), c.child(ce, "right")].into_iter().flatten() {
-            let u = unparen(c, side);
+            let u = strip_parens_node(c, side);
             if c.kind(u) != "update_expression" || !c.text(u).starts_with(['+', '-']) {
                 continue;
             }
@@ -663,13 +637,13 @@ pub fn op_vec_index(m: &mut M) -> Option<Vec<Edit>> {
                 cands.push((n, format!("{r}[{}]", dims[k])));
             } else if c.parent(n).is_some_and(|p| c.kind(p) == "expression_statement") {
                 let arg = *c.named(c.child(n, "arguments")?).first()?;
-                let a = unparen(c, arg);
+                let a = strip_parens_node(c, arg);
                 // `v.SetC(v.GetC() op h)` -> `v[kDC] op= h`
                 let compound = (c.kind(a) == "binary_expression" && matches!(c.op(a), Some("+" | "-" | "*" | "/")))
                     .then(|| (c.child(a, "left"), c.child(a, "right"), c.op(a)))
                     .and_then(|(l, rhs, op)| {
                         let (l, rr) = (l?, rhs?);
-                        let (lr, lk, lg) = accessor(c, unparen(c, l))?;
+                        let (lr, lk, lg) = accessor(c, strip_parens_node(c, l))?;
                         (lg && lk == k && normalize(c.text(lr)) == normalize(c.text(recv))).then(|| format!("{r}[{}] {}= {}", dims[k], op.unwrap_or("+"), c.text(rr)))
                     });
                 cands.push((n, compound.unwrap_or_else(|| format!("{r}[{}] = {}", dims[k], c.text(arg)))));
@@ -775,11 +749,11 @@ pub fn op_vec_copy(m: &mut M) -> Option<Vec<Edit>> {
             if let Some(al) = args {
                 let a = c.named(al);
                 if a.len() == 3 {
-                    let comps: Vec<Option<(String, usize)>> = a.iter().map(|&x| accessor(c, unparen(c, x)).filter(|t| t.2).map(|(r, k, _)| (normalize(c.text(r)), k))).collect();
+                    let comps: Vec<Option<(String, usize)>> = a.iter().map(|&x| accessor(c, strip_parens_node(c, x)).filter(|t| t.2).map(|(r, k, _)| (normalize(c.text(r)), k))).collect();
                     for k in 0..3 {
                         let others: Vec<&(String, usize)> = (0..3).filter(|&j| j != k).filter_map(|j| comps[j].as_ref().filter(|x| x.1 == j)).collect();
                         if others.len() == 2 && others[0].0 == others[1].0 && comps[k].as_ref().is_none_or(|x| x.0 != others[0].0 || x.1 != k) && !mentions(c, a[k], &name) {
-                            let recv = accessor(c, unparen(c, a[(k + 1) % 3])).map(|t| t.0)?;
+                            let recv = accessor(c, strip_parens_node(c, a[(k + 1) % 3])).map(|t| t.0)?;
                             if pure(c, recv) {
                                 fwd.push((s, ty.clone(), name.clone(), recv, k, a[k]));
                             }

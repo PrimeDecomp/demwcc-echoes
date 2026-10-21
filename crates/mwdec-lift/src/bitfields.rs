@@ -56,13 +56,6 @@ fn make(l: &Expr, shift: u8, width: u8, vars: &[Var], db: &TypeDb) -> Option<Exp
     Some(Expr::BitField { base: Box::new(l.clone()), shift, width, ty })
 }
 
-fn strip_cast(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_cast(e),
-        e => e,
-    }
-}
-
 /// Rewrite a read pattern into a BitField if the DB has one there.
 fn read(e: &Expr, vars: &[Var], db: &TypeDb) -> Option<Expr> {
     match e {
@@ -72,13 +65,13 @@ fn read(e: &Expr, vars: &[Var], db: &TypeDb) -> Option<Expr> {
             if m >> m.trailing_zeros() != m >> m.trailing_zeros() {
                 return None;
             }
-            match strip_cast(l) {
+            match strip_casts(l) {
                 Expr::Binary { op: BinOp::Shr, l: x, r: s, .. } => {
                     let s = int_of(s)? as u8;
                     if m.trailing_zeros() != 0 {
                         return None;
                     }
-                    make(strip_cast(x), s, w, vars, db)
+                    make(strip_casts(x), s, w, vars, db)
                 }
                 x if m.trailing_zeros() == 0 => make(x, 0, w, vars, db),
                 _ => None,
@@ -86,10 +79,10 @@ fn read(e: &Expr, vars: &[Var], db: &TypeDb) -> Option<Expr> {
         }
         // a signed field through a byte read: `(int)((x << k) & M) >> s` (the compiler's
         // `extlwi; srawi`), the field bits [s - k, 32 - k) of x
-        Expr::Binary { op: BinOp::Shr, l, r, .. } if matches!(strip_cast(l), Expr::Binary { op: BinOp::And, l: sl, .. } if matches!(strip_cast(sl), Expr::Binary { op: BinOp::Shl, .. })) => {
-            let Expr::Binary { l: sl, r: m, .. } = strip_cast(l) else { return None };
-            let Expr::Binary { l: x, r: k, .. } = strip_cast(sl) else { return None };
-            let (x, k, s, m) = (strip_cast(x), int_of(k)?, int_of(r)?, int_of(m)?);
+        Expr::Binary { op: BinOp::Shr, l, r, .. } if matches!(strip_casts(l), Expr::Binary { op: BinOp::And, l: sl, .. } if matches!(strip_casts(sl), Expr::Binary { op: BinOp::Shl, .. })) => {
+            let Expr::Binary { l: sl, r: m, .. } = strip_casts(l) else { return None };
+            let Expr::Binary { l: x, r: k, .. } = strip_casts(sl) else { return None };
+            let (x, k, s, m) = (strip_casts(x), int_of(k)?, int_of(r)?, int_of(m)?);
             let bits = unit_bits(x)?;
             // (bits shifted out of the top are dropped: the field is the top 32 - s bits)
             if s >= 32 || k > s || k + bits < 32 || (m as u64) < (1u64 << s) || (m >> s) != (u32::MAX >> s) {
@@ -113,7 +106,7 @@ fn read(e: &Expr, vars: &[Var], db: &TypeDb) -> Option<Expr> {
             })
         }
         Expr::Binary { op: BinOp::Shr, l, r, .. } => {
-            let x = strip_cast(l);
+            let x = strip_casts(l);
             let bits = unit_bits(x)?;
             let s = int_of(r)? as u8;
             if (s as u32) >= bits {
@@ -131,13 +124,13 @@ fn masked_test(e: &Expr, vars: &[Var], db: &TypeDb) -> Option<Expr> {
         if r.as_int() != Some(0) {
             return None;
         }
-        if let Expr::Binary { op: BinOp::And, l: x, r: m, .. } = strip_cast(l) {
+        if let Expr::Binary { op: BinOp::And, l: x, r: m, .. } = strip_casts(l) {
             let m = int_of(m)?;
             let (s, w) = mask_range(m)?;
             if s == 0 {
                 return None;
             }
-            let bf = make(strip_cast(x), s, w, vars, db)?;
+            let bf = make(strip_casts(x), s, w, vars, db)?;
             return Some(Expr::cmp(*op, bf, Expr::int(0)));
         }
     }
@@ -156,7 +149,7 @@ fn write_value(l: &Expr, y: &Expr, shift: u8, width: u8, vars: &[Var], db: &Type
             Some(Expr::int((v >> shift) as i64))
         }
         Expr::Binary { op: BinOp::And, l: e, r: mm, .. } if int_of(mm) == Some(m) => {
-            match strip_cast(e) {
+            match strip_casts(e) {
                 Expr::Binary { op: BinOp::Shl, l: v, r: s, .. } if int_of(s) == Some(shift as u32) => Some((**v).clone()),
                 other if shift == 0 => {
                     // value computed from the old field (e.g. `f | flags`)
@@ -193,13 +186,7 @@ pub fn recover(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
 fn forward_unit_temps(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
     let mut ndefs: std::collections::HashMap<VarId, usize> = Default::default();
     let mut uses: std::collections::HashMap<VarId, usize> = Default::default();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for s in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = s {
-                *ndefs.entry(*v).or_default() += 1;
-            }
-        }
-    });
+    crate::inline::count_defs(body, &mut ndefs);
     crate::inline::count_uses(body, &mut uses);
     fn subst(e: &mut Expr, t: VarId, unit: &Expr, n: &mut usize) {
         e.rewrite(&mut |x| {
@@ -265,13 +252,10 @@ fn forward_unit_temps(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
             };
             let mut next = b[i + 1].clone();
             let mut n = 0;
-            match &mut next {
-                Stmt::If { cond, then, els } => {
-                    subst(cond, t, &unit, &mut n);
-                    prefix(then, t, &unit, &mut n);
-                    prefix(els, t, &unit, &mut n);
-                }
-                _ => {}
+            if let Stmt::If { cond, then, els } = &mut next {
+                subst(cond, t, &unit, &mut n);
+                prefix(then, t, &unit, &mut n);
+                prefix(els, t, &unit, &mut n);
             }
             if n == 0 || n != uses.get(&t).copied().unwrap_or(0) {
                 i += 1;
@@ -292,7 +276,7 @@ fn forward_unit_temps(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
 /// `__rlwimi(dst, v, sh, mb, me)` spelled as `(dst & ~M) | ((v << sh) & M)`.
 fn rlwimi_form(src: &Expr, dst: &Expr) -> Option<Expr> {
     let Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. } = src else { return None };
-    if symbol != "__rlwimi" || args.len() != 5 || strip_cast(&args[0]) != dst {
+    if symbol != "__rlwimi" || args.len() != 5 || strip_casts(&args[0]) != dst {
         return None;
     }
     let (sh, mb, me) = (int_of(&args[2])?, int_of(&args[3])?, int_of(&args[4])?);
@@ -335,7 +319,7 @@ fn recover_in(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
             };
             let Expr::Binary { op: BinOp::Or, l: keep, r: y, .. } = src else { continue };
             let Expr::Binary { op: BinOp::And, l: old, r: nm, .. } = &**keep else { continue };
-            if strip_cast(old) != dst {
+            if strip_casts(old) != dst {
                 continue;
             }
             let bits = unit_bits(dst).unwrap();
@@ -734,13 +718,7 @@ fn chain_base(e: &Expr) -> &Expr {
 /// copy `t` are `r`.
 fn join_chains(body: &mut Vec<Stmt>, is_temp: &mut Vec<bool>) {
     let mut defs: HashMap<VarId, usize> = HashMap::new();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for st in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = st {
-                *defs.entry(*v).or_default() += 1;
-            }
-        }
-    });
+    crate::inline::count_defs(body, &mut defs);
     let mut renames: HashMap<VarId, VarId> = HashMap::new();
     Stmt::for_each_block_mut(body, &mut |b| {
         for i in 0..b.len() {
@@ -835,14 +813,11 @@ fn join_chains(body: &mut Vec<Stmt>, is_temp: &mut Vec<bool>) {
 
 fn insert_chains_inner(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<bool>) {
     stored_chains(body, vars, is_temp);
-    fn is_insert(e: &Expr) -> bool {
-        matches!(e, Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. } if symbol == "__rlwimi" && args.len() == 5)
-    }
     // (base, inserts innermost first)
     fn flatten(e: &Expr) -> (Expr, Vec<Expr>) {
         let mut inserts = vec![];
         let mut cur = e;
-        while is_insert(cur) {
+        while is_rlwimi(cur) {
             inserts.push(cur.clone());
             let Expr::Call { args, .. } = cur else { unreachable!() };
             cur = &args[0];
@@ -862,7 +837,7 @@ fn insert_chains_inner(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut 
                 continue;
             };
             let t = *t;
-            if !is_temp.get(t).copied().unwrap_or(false) || !is_insert(src) || chain.contains_key(&t) {
+            if !is_temp.get(t).copied().unwrap_or(false) || !is_rlwimi(src) || chain.contains_key(&t) {
                 i += 1;
                 continue;
             }
@@ -889,7 +864,7 @@ fn insert_chains_inner(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut 
             i += n;
         }
     });
-    for (_, r) in &chain {
+    for r in chain.values() {
         if let Some(x) = is_temp.get_mut(*r) {
             *x = false;
         }
@@ -919,9 +894,6 @@ fn insert_chains_inner(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut 
 /// first (`reg = 0; reg = __rlwimi(reg, a, ..); ..; GXWGFifo.u32 = reg;`), computed before the
 /// stores just ahead of it when it reads no memory.
 fn stored_chains(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<bool>) {
-    fn is_insert(e: &Expr) -> bool {
-        matches!(e, Expr::Call { callee: Callee::Direct { symbol, .. }, args, .. } if symbol == "__rlwimi" && args.len() == 5)
-    }
     fn reads_memory(e: &Expr) -> bool {
         let mut m = false;
         e.walk(&mut |x| {
@@ -947,8 +919,8 @@ fn stored_chains(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<bo
                 continue;
             }
             let (outer_cast, chain) = match src {
-                Expr::Cast { ty, e } if is_insert(e) => (Some(ty.clone()), (**e).clone()),
-                e if is_insert(e) => (None, e.clone()),
+                Expr::Cast { ty, e } if is_rlwimi(e) => (Some(ty.clone()), (**e).clone()),
+                e if is_rlwimi(e) => (None, e.clone()),
                 _ => {
                     i += 1;
                     continue;
@@ -956,7 +928,7 @@ fn stored_chains(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<bo
             };
             let mut inserts = vec![];
             let mut cur = &chain;
-            while is_insert(cur) {
+            while is_rlwimi(cur) {
                 inserts.push(cur.clone());
                 let Expr::Call { args, .. } = cur else { unreachable!() };
                 cur = &args[0];

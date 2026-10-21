@@ -384,6 +384,21 @@ pub fn strip_cv(t: &Type) -> &Type {
     }
 }
 
+/// Occurrences of `Var(v)` in the statements of `body` (nested ones included).
+pub fn count_var(body: &[Stmt], v: VarId) -> usize {
+    let mut n = 0;
+    Stmt::walk_exprs(body, &mut |e| n += matches!(e, Expr::Var(x) if *x == v) as usize);
+    n
+}
+
+/// `e` under all its casts.
+pub fn strip_casts(e: &Expr) -> &Expr {
+    match e {
+        Expr::Cast { e, .. } => strip_casts(e),
+        e => e,
+    }
+}
+
 /// Pointee of a pointer/reference type (cv stripped on the outer level).
 pub fn pointee(t: &Type) -> Option<&Type> {
     match strip_cv(t) {
@@ -730,6 +745,41 @@ fn is_float_expr_hint(e: &Expr) -> bool {
 }
 
 impl Stmt {
+    /// Visit every statement of `body` and its nested lists, pre-order.
+    pub fn each(body: &[Stmt], f: &mut dyn FnMut(&Stmt)) {
+        for s in body {
+            f(s);
+            match s {
+                Stmt::If { then, els, .. } => {
+                    Stmt::each(then, f);
+                    Stmt::each(els, f);
+                }
+                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => Stmt::each(body, f),
+                Stmt::For { init, step, body, .. } => {
+                    Stmt::each(init, f);
+                    Stmt::each(step, f);
+                    Stmt::each(body, f);
+                }
+                Stmt::Switch { cases, .. } => {
+                    for c in cases {
+                        Stmt::each(&c.body, f);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Does `Var(v)` occur in `self` (its nested statements included)?
+    pub fn uses_var(&self, v: VarId) -> bool {
+        self.count_var(v) > 0
+    }
+
+    /// Occurrences of `Var(v)` in `self` (its nested statements included).
+    pub fn count_var(&self, v: VarId) -> usize {
+        count_var(std::slice::from_ref(self), v)
+    }
+
     /// Visit nested statement lists mutably (pre-order over statements).
     pub fn for_each_block_mut(body: &mut Vec<Stmt>, f: &mut dyn FnMut(&mut Vec<Stmt>)) {
         f(body);

@@ -15,13 +15,6 @@
 use crate::ir::*;
 use std::collections::HashMap;
 
-fn strip(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip(e),
-        e => e,
-    }
-}
-
 fn is_ctr(vars: &[Var], v: VarId) -> bool {
     vars[v].name.starts_with("var_ctr")
 }
@@ -176,9 +169,9 @@ fn canon_expr(e: &Expr) -> Expr {
 
 /// `Var(v) + k` (or `Var(v)`): (v, k)
 fn affine(e: &Expr) -> Option<(VarId, i64)> {
-    match strip(e) {
+    match strip_casts(e) {
         Expr::Var(v) => Some((*v, 0)),
-        Expr::Binary { op: BinOp::Add, l, r, .. } => match (strip(l), r.as_int()) {
+        Expr::Binary { op: BinOp::Add, l, r, .. } => match (strip_casts(l), r.as_int()) {
             (Expr::Var(v), Some(k)) => Some((*v, k)),
             _ => None,
         },
@@ -283,7 +276,7 @@ fn shift_item(it: &Item, d: &HashMap<VarId, i64>, vars: &[Var]) -> Item {
         match s {
             Stmt::Assign { dst, src } => Stmt::Assign { dst: f(dst), src: f(src) },
             Stmt::Expr(e) => Stmt::Expr(f(e)),
-            Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| f(e))),
+            Stmt::Return(e) => Stmt::Return(e.as_ref().map(f)),
             Stmt::If { cond, then, els } => Stmt::If { cond: f(cond), then: on_stmts(then, f), els: on_stmts(els, f) },
             other => other.clone(),
         }
@@ -316,7 +309,7 @@ fn renumber(it: &Item, base: usize) -> Item {
         match s {
             Stmt::Assign { dst, src } => Stmt::Assign { dst: f(dst), src: f(src) },
             Stmt::Expr(e) => Stmt::Expr(f(e)),
-            Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| f(e))),
+            Stmt::Return(e) => Stmt::Return(e.as_ref().map(f)),
             Stmt::If { cond, then, els } => Stmt::If { cond: f(cond), then: on_stmts(then, f), els: on_stmts(els, f) },
             other => other.clone(),
         }
@@ -344,8 +337,8 @@ struct Shape {
 fn loop_shape(s: &Stmt, vars: &[Var], after: Option<&Stmt>) -> Option<Shape> {
     match s {
         Stmt::DoWhile { body, cond } => {
-            let Expr::Binary { op: BinOp::Ne, l, r, .. } = strip(cond) else { return None };
-            let Expr::Var(c) = strip(l) else { return None };
+            let Expr::Binary { op: BinOp::Ne, l, r, .. } = strip_casts(cond) else { return None };
+            let Expr::Var(c) = strip_casts(l) else { return None };
             if r.as_int() != Some(0) || !is_ctr(vars, *c) {
                 return None;
             }
@@ -383,8 +376,8 @@ fn loop_shape(s: &Stmt, vars: &[Var], after: Option<&Stmt>) -> Option<Shape> {
             }
             let Item::Exit(tc, done) = lin[n - 1].clone() else { return None };
             let Item::S(dec) = lin[n - 2].clone() else { return None };
-            let c = match strip(&tc) {
-                Expr::Binary { op: BinOp::Eq, l, r, .. } if r.as_int() == Some(0) => match strip(l) {
+            let c = match strip_casts(&tc) {
+                Expr::Binary { op: BinOp::Eq, l, r, .. } if r.as_int() == Some(0) => match strip_casts(l) {
                     Expr::Var(c) => *c,
                     _ => return None,
                 },
@@ -403,9 +396,9 @@ fn loop_shape(s: &Stmt, vars: &[Var], after: Option<&Stmt>) -> Option<Shape> {
 
 fn is_dec(s: &Stmt, v: VarId) -> bool {
     match s {
-        Stmt::Assign { dst: Expr::Var(x), src } if *x == v => match strip(src) {
-            Expr::Binary { op: BinOp::Sub, l, r, .. } => matches!(strip(l), Expr::Var(y) if *y == v) && r.as_int() == Some(1),
-            Expr::Binary { op: BinOp::Add, l, r, .. } => matches!(strip(l), Expr::Var(y) if *y == v) && r.as_int() == Some(-1),
+        Stmt::Assign { dst: Expr::Var(x), src } if *x == v => match strip_casts(src) {
+            Expr::Binary { op: BinOp::Sub, l, r, .. } => matches!(strip_casts(l), Expr::Var(y) if *y == v) && r.as_int() == Some(1),
+            Expr::Binary { op: BinOp::Add, l, r, .. } => matches!(strip_casts(l), Expr::Var(y) if *y == v) && r.as_int() == Some(-1),
             _ => false,
         },
         _ => false,
@@ -456,7 +449,7 @@ fn rebuild(items: &[Item], subst: &HashMap<VarId, Expr>, vars: &[Var]) -> Vec<St
             Stmt::Assign { dst: Expr::Var(t), .. } if drop(*t) => return None,
             Stmt::Assign { dst, src } => Stmt::Assign { dst: f(dst), src: f(src) },
             Stmt::Expr(e) => Stmt::Expr(f(e)),
-            Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| f(e))),
+            Stmt::Return(e) => Stmt::Return(e.as_ref().map(f)),
             Stmt::If { cond, then, els } => Stmt::If { cond: f(cond), then: on_stmts(then, f, drop), els: on_stmts(els, f, drop) },
             Stmt::Comment(c) if c.is_empty() => return None,
             other => other.clone(),
@@ -562,12 +555,12 @@ fn try_reroll(b: &mut Vec<Stmt>, j: usize, vars: &[Var], is_temp: &[bool], whole
     let shape = loop_shape(&b[j], vars, b.get(j + 1))?;
     let c = shape.ctr;
     // the counter: `c = K` earlier in this list, read only by the loop's decrement and test
-    let ip = (0..j).rev().find(|&k| crate::idioms::stmt_mentions(&b[k], c))?;
+    let ip = (0..j).rev().find(|&k| Stmt::uses_var(&b[k], c))?;
     let Stmt::Assign { dst: Expr::Var(x), src } = &b[ip] else { return None };
     if *x != c {
         return None;
     }
-    let k_iters = strip(src).as_int()?;
+    let k_iters = strip_casts(src).as_int()?;
     if !(1..=4096).contains(&k_iters) || count_reads(whole, c) != 2 {
         return None;
     }
@@ -579,8 +572,8 @@ fn try_reroll(b: &mut Vec<Stmt>, j: usize, vars: &[Var], is_temp: &[bool], whole
     let mut defs_before: Vec<usize> = vec![];
     let mut updated: Vec<VarId> = vec![];
     let item_mentions = |it: &Item, v: VarId| match it {
-        Item::S(s) => crate::idioms::stmt_mentions(s, v),
-        Item::Exit(c, b) => c.uses_var(v) || b.iter().any(|s| crate::idioms::stmt_mentions(s, v)),
+        Item::S(s) => Stmt::uses_var(s, v),
+        Item::Exit(c, b) => c.uses_var(v) || b.iter().any(|s| Stmt::uses_var(s, v)),
     };
     for it in &shape.items {
         // an induction variable is not read after its update (MWCC updates at the end of
@@ -667,7 +660,7 @@ fn try_reroll(b: &mut Vec<Stmt>, j: usize, vars: &[Var], is_temp: &[bool], whole
     // try the largest number of copies first
     let mut chosen: Option<(usize, HashMap<VarId, i64>)> = None;
     for m in (1..=n.min(16)).rev() {
-        if n % m != 0 {
+        if !n.is_multiple_of(m) {
             continue;
         }
         let p = n / m;
@@ -716,7 +709,7 @@ fn try_reroll(b: &mut Vec<Stmt>, j: usize, vars: &[Var], is_temp: &[bool], whole
     let subst: HashMap<VarId, Expr> = cn
         .env
         .iter()
-        .filter(|(_, e)| affine(e).map_or(false, |(v, _)| total.contains_key(&v) || !is_temp.get(v).copied().unwrap_or(false)))
+        .filter(|(_, e)| affine(e).is_some_and(|(v, _)| total.contains_key(&v) || !is_temp.get(v).copied().unwrap_or(false)))
         .map(|(&t, e)| (t, e.clone()))
         .collect();
     // copy 0's affine temps are relative to the iteration start; later copies' temps don't
@@ -725,9 +718,9 @@ fn try_reroll(b: &mut Vec<Stmt>, j: usize, vars: &[Var], is_temp: &[bool], whole
     let count = k_iters * m as i64;
     // the index: an IV starting at 0 with stride 1, else a fresh `i`
     let init_of = |v: VarId, b: &Vec<Stmt>| -> Option<usize> {
-        let k = (0..j).rev().find(|&k| crate::idioms::stmt_mentions(&b[k], v))?;
+        let k = (0..j).rev().find(|&k| Stmt::uses_var(&b[k], v))?;
         match &b[k] {
-            Stmt::Assign { dst: Expr::Var(x), src } if *x == v && strip(src).as_int() == Some(0) => Some(k),
+            Stmt::Assign { dst: Expr::Var(x), src } if *x == v && strip_casts(src).as_int() == Some(0) => Some(k),
             _ => None,
         }
     };
@@ -754,7 +747,7 @@ fn try_reroll(b: &mut Vec<Stmt>, j: usize, vars: &[Var], is_temp: &[bool], whole
             }
         }
     }
-    let mut ivs: Vec<(VarId, i64)> = stride.iter().map(|(&v, &s)| (v, s)).filter(|&(v, s)| s != 0 && index.map_or(true, |(i, _)| i != v)).collect();
+    let mut ivs: Vec<(VarId, i64)> = stride.iter().map(|(&v, &s)| (v, s)).filter(|&(v, s)| s != 0 && index.is_none_or(|(i, _)| i != v)).collect();
     ivs.sort();
     for (v, s) in &ivs {
         let src = if is_ptr(&vars[*v].ty) { ptr_add(*v, *s) } else { Expr::bin(BinOp::Add, Expr::Var(*v), Expr::int(*s), vars[*v].ty.clone()) };
@@ -837,7 +830,7 @@ pub fn forward_constant_copies(body: &mut Vec<Stmt>, is_temp: &[bool]) {
                 Stmt::Assign { dst: Expr::Var(t), src: Expr::Var(x) } if is_temp.get(*t).copied().unwrap_or(false) && !is_temp.get(*x).copied().unwrap_or(false) => *x,
                 _ => continue,
             };
-            let Some(k) = (0..i).rev().find(|&k| crate::idioms::stmt_mentions(&b[k], x)) else { continue };
+            let Some(k) = (0..i).rev().find(|&k| Stmt::uses_var(&b[k], x)) else { continue };
             let val = match &b[k] {
                 Stmt::Assign { dst: Expr::Var(y), src: v @ Expr::Int { .. } } if *y == x => v.clone(),
                 _ => continue,
@@ -855,7 +848,7 @@ pub fn propagate_constant_temps(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[b
     // a constant kept in a callee-saved register across calls was a variable in the source
     let volatile_home = |v: VarId| {
         let n = &vars[v].name;
-        n.strip_prefix("temp_r").or_else(|| n.strip_prefix("temp_f")).and_then(|r| r.split('_').next()).and_then(|d| d.parse::<u8>().ok()).map_or(false, |d| d < 14)
+        n.strip_prefix("temp_r").or_else(|| n.strip_prefix("temp_f")).and_then(|r| r.split('_').next()).and_then(|d| d.parse::<u8>().ok()).is_some_and(|d| d < 14)
     };
     let mut defs: HashMap<VarId, (usize, Option<Expr>)> = HashMap::new();
     fn scan(b: &[Stmt], is_temp: &[bool], defs: &mut HashMap<VarId, (usize, Option<Expr>)>) {
@@ -954,7 +947,7 @@ pub fn rematerialize_global_temps(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &
                     let mut arm_ok = true;
                     for arm in [then, els] {
                         for (k, s) in arm.iter().enumerate() {
-                            let m = crate::idioms::stmt_mentions(s, t);
+                            let m = Stmt::uses_var(s, t);
                             if !m {
                                 continue;
                             }
@@ -971,7 +964,7 @@ pub fn rematerialize_global_temps(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &
                                 }
                                 _ => false,
                             };
-                            let assigns_base = base_var.map_or(false, |v| matches!(s, Stmt::Assign { dst: Expr::Var(x), .. } if *x == v));
+                            let assigns_base = base_var.is_some_and(|v| matches!(s, Stmt::Assign { dst: Expr::Var(x), .. } if *x == v));
                             let plain = !assigns_base
                                 && match s {
                                     Stmt::Assign { src, .. } => !src.has_call() || call_ok(src),
@@ -1039,7 +1032,7 @@ pub fn recover_shape_b(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool]) {
             let Stmt::While { cond: wc, .. } = &then[0] else { continue };
             let (g, w) = (strip_ne0(cond), strip_ne0(wc));
             // `n = t; if (t != 0) while (n != 0)`
-            let copied = matches!((&prev, g, w), (Some(Stmt::Assign { dst: Expr::Var(n), src }), Expr::Var(t), Expr::Var(n2)) if n == n2 && matches!(strip(src), Expr::Var(t2) if t2 == t));
+            let copied = matches!((&prev, g, w), (Some(Stmt::Assign { dst: Expr::Var(n), src }), Expr::Var(t), Expr::Var(n2)) if n == n2 && matches!(strip_casts(src), Expr::Var(t2) if t2 == t));
             if g == w || copied {
                 let w = then.remove(0);
                 b[i] = w;
@@ -1050,12 +1043,12 @@ pub fn recover_shape_b(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool]) {
 
 /// `X + 1 - A` (inclusive) or `X - A` (exclusive) trip counts: (A, X, inclusive).
 fn trip_bounds(src: &Expr) -> Option<(Expr, Expr, bool)> {
-    match strip(src) {
-        Expr::Binary { op: BinOp::Sub, l, r, .. } => match strip(l) {
+    match strip_casts(src) {
+        Expr::Binary { op: BinOp::Sub, l, r, .. } => match strip_casts(l) {
             Expr::Binary { op: BinOp::Add, l: x, r: one, .. } if one.as_int() == Some(1) => Some(((**r).clone(), (**x).clone(), true)),
             _ => Some(((**r).clone(), (**l).clone(), false)),
         },
-        Expr::Binary { op: BinOp::Add, l, r: one, .. } if one.as_int() == Some(1) => match strip(l) {
+        Expr::Binary { op: BinOp::Add, l, r: one, .. } if one.as_int() == Some(1) => match strip_casts(l) {
             Expr::Binary { op: BinOp::Sub, l: x, r: a, .. } => Some(((**a).clone(), (**x).clone(), true)),
             _ => None,
         },
@@ -1080,7 +1073,7 @@ fn assigns_any(b: &[Stmt], vs: &[VarId]) -> bool {
         if let Stmt::Expr(e) | Stmt::Assign { src: e, .. } = s {
             e.walk(&mut |x| {
                 if let Expr::IncDec { e, .. } = x {
-                    if matches!(strip(e), Expr::Var(y) if vs.contains(y)) {
+                    if matches!(strip_casts(e), Expr::Var(y) if vs.contains(y)) {
                         inc = true;
                     }
                 }
@@ -1114,13 +1107,13 @@ pub fn counted_for(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<
                     if !els.is_empty() || then.len() != 1 {
                         return None;
                     }
-                    let Expr::Binary { op, l, r, .. } = strip(cond) else { return None };
-                    let (sa, sx) = (strip(&a), strip(&x));
+                    let Expr::Binary { op, l, r, .. } = strip_casts(cond) else { return None };
+                    let (sa, sx) = (strip_casts(&a), strip_casts(&x));
                     let ok = match op {
-                        BinOp::Le => incl && strip(l) == sa && strip(r) == sx,
-                        BinOp::Ge => incl && strip(l) == sx && strip(r) == sa,
-                        BinOp::Lt => !incl && strip(l) == sa && strip(r) == sx,
-                        BinOp::Gt => !incl && strip(l) == sx && strip(r) == sa,
+                        BinOp::Le => incl && strip_casts(l) == sa && strip_casts(r) == sx,
+                        BinOp::Ge => incl && strip_casts(l) == sx && strip_casts(r) == sa,
+                        BinOp::Lt => !incl && strip_casts(l) == sa && strip_casts(r) == sx,
+                        BinOp::Gt => !incl && strip_casts(l) == sx && strip_casts(r) == sa,
                         _ => false,
                     };
                     if !ok {
@@ -1136,7 +1129,7 @@ pub fn counted_for(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<
                     }
                     let mut lb = wb.clone();
                     lb.remove(last);
-                    if lb.iter().any(|s| crate::idioms::stmt_mentions(s, n)) || has_own_jump(&lb, false) {
+                    if lb.iter().any(|s| Stmt::uses_var(s, n)) || has_own_jump(&lb, false) {
                         return None;
                     }
                     // the bounds are read once, before the loop: nothing in it may change them
@@ -1180,8 +1173,8 @@ pub fn counted_for(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<
 }
 
 fn strip_ne0(e: &Expr) -> &Expr {
-    match strip(e) {
-        Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) => strip(l),
+    match strip_casts(e) {
+        Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) => strip_casts(l),
         x => x,
     }
 }
@@ -1189,14 +1182,14 @@ fn strip_ne0(e: &Expr) -> &Expr {
 /// `do { B; c = c - 1; } while (c != 0)` with c a CTR var: (c, B)
 fn ctr_do(s: &Stmt, vars: &[Var]) -> Option<(VarId, Vec<Stmt>)> {
     let Stmt::DoWhile { body, cond } = s else { return None };
-    let Expr::Binary { op: BinOp::Ne, l, r, .. } = strip(cond) else { return None };
-    let Expr::Var(c) = strip(l) else { return None };
+    let Expr::Binary { op: BinOp::Ne, l, r, .. } = strip_casts(cond) else { return None };
+    let Expr::Var(c) = strip_casts(l) else { return None };
     if r.as_int() != Some(0) || !is_ctr(vars, *c) {
         return None;
     }
     let mut b = real(body);
     let last = b.pop()?;
-    if !is_dec(&last, *c) || b.iter().any(|s| crate::idioms::stmt_mentions(s, *c)) {
+    if !is_dec(&last, *c) || b.iter().any(|s| Stmt::uses_var(s, *c)) {
         return None;
     }
     Some((*c, b))
@@ -1206,7 +1199,7 @@ fn shape_b_at(b: &[Stmt], k: usize, vars: &[Var], is_temp: &[bool]) -> Option<(u
     let Stmt::If { cond: tc, then, els } = &b[k] else { return None };
     // `t != 0`
     let t = strip_ne0(tc).clone();
-    if matches!(strip(tc), Expr::Binary { op: BinOp::Ne, .. }) == false {
+    if !matches!(strip_casts(tc), Expr::Binary { op: BinOp::Ne, .. }) {
         return None;
     }
     // ctr = t right before (and t = n >> s before that, or t inline)
@@ -1214,7 +1207,7 @@ fn shape_b_at(b: &[Stmt], k: usize, vars: &[Var], is_temp: &[bool]) -> Option<(u
         return None;
     }
     let Stmt::Assign { dst: Expr::Var(ctr), src: ci } = &b[k - 1] else { return None };
-    if !is_ctr(vars, *ctr) || strip(ci) != &t && !matches!((strip(ci), &t), (Expr::Var(a), Expr::Var(b)) if a == b) {
+    if !is_ctr(vars, *ctr) || strip_casts(ci) != &t && !matches!((strip_casts(ci), &t), (Expr::Var(a), Expr::Var(b)) if a == b) {
         return None;
     }
     let mut start = k - 1;
@@ -1229,13 +1222,13 @@ fn shape_b_at(b: &[Stmt], k: usize, vars: &[Var], is_temp: &[bool]) -> Option<(u
         }
         e => e.clone(),
     };
-    let Expr::Binary { op: BinOp::Shr, l: nexp, r: sh, .. } = strip(&shifted) else { return None };
+    let Expr::Binary { op: BinOp::Shr, l: nexp, r: sh, .. } = strip_casts(&shifted) else { return None };
     let s = sh.as_int()?;
     if !(1..=3).contains(&s) {
         return None;
     }
     let f = 1i64 << s;
-    let Expr::Var(nx) = strip(nexp) else { return None };
+    let Expr::Var(nx) = strip_casts(nexp) else { return None };
     let nx = *nx;
     // then: [main loop, n = n & (F-1), if (n != 0) goto R]
     let then = real(then);
@@ -1250,8 +1243,8 @@ fn shape_b_at(b: &[Stmt], k: usize, vars: &[Var], is_temp: &[bool]) -> Option<(u
     // the shift may read the value n was copied from (`n = t; ... t >> 3`)
     if nx != n {
         // the copy is in this list, or (when n isn't touched here) before an enclosing guard
-        if let Some(j) = (0..start).rev().find(|&j| crate::idioms::stmt_mentions(&b[j], n)) {
-            if !matches!(&b[j], Stmt::Assign { dst: Expr::Var(x), src } if *x == n && matches!(strip(src), Expr::Var(y) if *y == nx)) {
+        if let Some(j) = (0..start).rev().find(|&j| Stmt::uses_var(&b[j], n)) {
+            if !matches!(&b[j], Stmt::Assign { dst: Expr::Var(x), src } if *x == n && matches!(strip_casts(src), Expr::Var(y) if *y == nx)) {
                 return None;
             }
         }
@@ -1261,7 +1254,7 @@ fn shape_b_at(b: &[Stmt], k: usize, vars: &[Var], is_temp: &[bool]) -> Option<(u
         return None;
     }
     match &then[1] {
-        Stmt::Assign { dst: Expr::Var(x), src: Expr::Binary { op: BinOp::And, l, r, .. } } if *x == n && matches!(strip(l), Expr::Var(y) if *y == n) && r.as_int() == Some(f - 1) => {}
+        Stmt::Assign { dst: Expr::Var(x), src: Expr::Binary { op: BinOp::And, l, r, .. } } if *x == n && matches!(strip_casts(l), Expr::Var(y) if *y == n) && r.as_int() == Some(f - 1) => {}
         _ => return None,
     }
     let Stmt::If { cond: gc, then: gt, els: ge } = &then[2] else { return None };
@@ -1270,7 +1263,7 @@ fn shape_b_at(b: &[Stmt], k: usize, vars: &[Var], is_temp: &[bool]) -> Option<(u
     }
     // else: [ctr2 = n, remainder loop] (the label was stripped by real())
     let Stmt::Assign { dst: Expr::Var(c2), src: c2i } = &els[0] else { return None };
-    if !matches!(strip(c2i), Expr::Var(y) if *y == n) {
+    if !matches!(strip_casts(c2i), Expr::Var(y) if *y == n) {
         return None;
     }
     let (c2b, rem) = ctr_do(&els[1], vars)?;

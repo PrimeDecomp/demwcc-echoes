@@ -5,9 +5,9 @@
 //! wrote it: `for (const T* it = v.begin(); it != v.end(); ++it)` (as a `while`), the pointer
 //! typed `T*` so element accesses read as members.
 
-use crate::util::strip;
+use mwdec_lift::strip_cv;
 use mwdec_core::{FuncSig, Type, TypeDb};
-use mwdec_lift::{BinOp, Callee, Expr, IrFunction, Stmt, VarId, VarKind};
+use mwdec_lift::{strip_casts, BinOp, Callee, Expr, IrFunction, Stmt, VarId, VarKind};
 
 /// `rstl::reserved_vector<T, N>`: (T, element size, offset of the data).
 fn pointer_container(db: &TypeDb, cls: &str) -> Option<(Type, i64, i32)> {
@@ -20,18 +20,11 @@ fn pointer_container(db: &TypeDb, cls: &str) -> Option<(Type, i64, i32)> {
     let t = mwdec_lift::sig::parse_type(args.first()?.trim());
     let n: i64 = args.get(1)?.trim().parse().ok()?;
     let c = mwdec_lift::sig::find_class(db, cls)?;
-    let data = c.fields.iter().find(|f| matches!(strip(&mwdec_lift::types::resolve(Some(db), &f.ty)), Type::Array(..)))?;
+    let data = c.fields.iter().find(|f| matches!(strip_cv(&mwdec_lift::types::resolve(Some(db), &f.ty)), Type::Array(..)))?;
     // (the storage is `uchar mData[N * sizeof(T)]`: the element size without T's layout)
     let bytes = mwdec_lift::types::size_of(Some(db), &data.ty)? as i64;
     let size = if n > 0 { bytes / n } else { 0 };
     (size > 0).then_some((t, size, data.offset as i32))
-}
-
-fn strip_casts(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_casts(e),
-        e => e,
-    }
 }
 
 /// `(char*)base + k` / `&base->field` forms: (base, k).
@@ -75,7 +68,7 @@ fn container_of(ir: &IrFunction, db: &TypeDb, begin: &Expr) -> Option<(Expr, Str
         let pt = ir.vars[*v].ty.clone();
         let (inner, cst) = match &pt {
             Type::Const(x) => ((**x).clone(), true),
-            Type::Ref(x) | Type::Ptr(x) => (strip(x).clone(), matches!(&**x, Type::Const(_))),
+            Type::Ref(x) | Type::Ptr(x) => (strip_cv(x).clone(), matches!(&**x, Type::Const(_))),
             t => (t.clone(), false),
         };
         let cls = crate::util::class_name(&inner, db)?;
@@ -116,12 +109,6 @@ fn rewrite_steps(body: &mut [Stmt], p: VarId, size: i64) -> bool {
         }
     }
     ok
-}
-
-fn mentions(s: &Stmt, v: VarId) -> bool {
-    let mut hit = false;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| hit |= matches!(e, Expr::Var(x) if *x == v));
-    hit
 }
 
 fn method(cls: &str, name: &str, ret: Type, is_const: bool) -> FuncSig {
@@ -281,7 +268,7 @@ fn push_backs(ir: &mut IrFunction, db: &TypeDb) -> usize {
 fn object_pointer_locals(ir: &mut IrFunction) {
     let vars = ir.vars.clone();
     for v in 0..vars.len() {
-        if vars[v].kind != VarKind::Local || !matches!(strip(&vars[v].ty), Type::Ptr(x) if matches!(strip(x), Type::Void | Type::Unknown { .. } | Type::Int { size: 1, .. } | Type::Char)) {
+        if vars[v].kind != VarKind::Local || !matches!(strip_cv(&vars[v].ty), Type::Ptr(x) if matches!(strip_cv(x), Type::Void | Type::Unknown { .. } | Type::Int { size: 1, .. } | Type::Char)) {
             continue;
         }
         let defs: Vec<Expr> = ir.body.iter().flat_map(|s| collect_defs(s, v)).collect();
@@ -297,7 +284,7 @@ fn object_pointer_locals(ir: &mut IrFunction) {
                 }
             }
         });
-        let cls = match strip(&lt) {
+        let cls = match strip_cv(&lt) {
             Type::Named(c) => c.clone(),
             _ => match recv {
                 Some(c) => c,
@@ -516,17 +503,17 @@ fn try_loop(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<()> {
     }
     // the end local is used by nothing else before the loop (after it, it is `v.end()` again)
     if let Some((e, de)) = end_var {
-        if ir.body.iter().enumerate().any(|(i, s)| i != de && i < w && mentions(s, e)) {
+        if ir.body.iter().enumerate().any(|(i, s)| i != de && i < w && Stmt::uses_var(s, e)) {
             return None;
         }
         if let Stmt::While { body, .. } = &ir.body[w] {
-            if body.iter().any(|s| mentions(s, e)) {
+            if body.iter().any(|s| Stmt::uses_var(s, e)) {
                 return None;
             }
         }
     }
     // p: defined once before, stepped by the element size in the loop, not used before it
-    if (d + 1..w).any(|i| Some(i) != end_var.map(|x| x.1) && mentions(&ir.body[i], p)) {
+    if (d + 1..w).any(|i| Some(i) != end_var.map(|x| x.1) && Stmt::uses_var(&ir.body[i], p)) {
         return None;
     }
     let mut body = match &ir.body[w] {
@@ -661,7 +648,7 @@ fn list_of(ir: &IrFunction, db: &TypeDb, begin: &Expr) -> Option<(Expr, String, 
     if matches!(ir.vars[*v].kind, VarKind::Param { .. }) {
         let pt = ir.vars[*v].ty.clone();
         let (inner, cst) = match &pt {
-            Type::Ref(x) | Type::Ptr(x) => (strip(x).clone(), matches!(&**x, Type::Const(_))),
+            Type::Ref(x) | Type::Ptr(x) => (strip_cv(x).clone(), matches!(&**x, Type::Const(_))),
             Type::Const(x) => ((**x).clone(), true),
             t => (t.clone(), false),
         };
@@ -729,7 +716,7 @@ fn try_list_loop(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<usize> {
         _ => return None,
     };
     // not used between its definition and the loop
-    if (d + 1..w).any(|i| Some(i) != end_var.map(|x| x.1) && mentions(&ir.body[i], p)) {
+    if (d + 1..w).any(|i| Some(i) != end_var.map(|x| x.1) && Stmt::uses_var(&ir.body[i], p)) {
         return None;
     }
     let iter_cls = format!("{cls}::{}", if cst { "const_iterator" } else { "iterator" });
@@ -819,7 +806,7 @@ fn try_list_loop(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<usize> {
     let mut cond_ok = true;
     // (the body may not read the end local)
     if let Some((e, _)) = end_var {
-        cond_ok = !new_body.iter().any(|s| mentions(s, e));
+        cond_ok = !new_body.iter().any(|s| Stmt::uses_var(s, e));
     }
     if !cond_ok {
         return None;
@@ -927,7 +914,7 @@ fn try_map_loop(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<usize> {
 fn map_loop_rewrite(ir: &mut IrFunction, db: &TypeDb, w: usize, p: VarId, t: VarId, td: usize, cbase: Expr, k: i64) -> Option<usize> {
     // the container: a reference parameter, or a member of this
     let param_obj = |v: VarId| -> Option<(Expr, String, bool)> {
-        let cls = crate::util::class_name(strip(&ir.vars[v].ty), db)?;
+        let cls = crate::util::class_name(strip_cv(&ir.vars[v].ty), db)?;
         let index = match ir.vars[v].kind {
             VarKind::Param { index } => index,
             _ => return None,
@@ -937,10 +924,10 @@ fn map_loop_rewrite(ir: &mut IrFunction, db: &TypeDb, w: usize, p: VarId, t: Var
     };
     let (cont, cls, cst) = match &cbase {
         // a reference parameter's object
-        Expr::Var(v) if matches!(ir.vars[*v].kind, VarKind::Param { .. }) && !matches!(strip(&ir.vars[*v].ty), Type::Ptr(_)) => param_obj(*v)?,
+        Expr::Var(v) if matches!(ir.vars[*v].kind, VarKind::Param { .. }) && !matches!(strip_cv(&ir.vars[*v].ty), Type::Ptr(_)) => param_obj(*v)?,
         Expr::AddrOf(x) => match &**x {
             Expr::Var(v) if matches!(ir.vars[*v].kind, VarKind::Param { .. }) => {
-                let cls = crate::util::class_name(strip(&ir.vars[*v].ty), db)?;
+                let cls = crate::util::class_name(strip_cv(&ir.vars[*v].ty), db)?;
                 let cst = matches!(&ir.vars[*v].ty, Type::Const(_)) || ir.sig.params.get(match ir.vars[*v].kind {
                     VarKind::Param { index } => index,
                     _ => usize::MAX,
@@ -988,7 +975,7 @@ fn map_loop_finish(ir: &mut IrFunction, db: &TypeDb, w: usize, p: VarId, t: VarI
         return None;
     }
     // the header local and the walk used nowhere else (but as the element's address)
-    if rest.iter().any(|s| mentions(s, t)) || ir.body[w + 1..].iter().any(|s| mentions(s, t) || mentions(s, p)) || (td + 1..w - 1).any(|i| mentions(&ir.body[i], t) || mentions(&ir.body[i], p)) {
+    if rest.iter().any(|s| Stmt::uses_var(s, t)) || ir.body[w + 1..].iter().any(|s| Stmt::uses_var(s, t) || Stmt::uses_var(s, p)) || (td + 1..w - 1).any(|i| Stmt::uses_var(&ir.body[i], t) || Stmt::uses_var(&ir.body[i], p)) {
         return None;
     }
     let iter_cls = format!("{cls}::{}", if cst { "const_iterator" } else { "iterator" });
@@ -1101,7 +1088,7 @@ fn try_list_find(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<usize> {
         return None;
     }
     // nothing else between uses the walk or the end
-    if (d + 1..w).any(|i| Some(i) != end_var.map(|x| x.1) && (mentions(&ir.body[i], p) || end_var.is_some_and(|(e, _)| mentions(&ir.body[i], e)))) {
+    if (d + 1..w).any(|i| Some(i) != end_var.map(|x| x.1) && (Stmt::uses_var(&ir.body[i], p) || end_var.is_some_and(|(e, _)| Stmt::uses_var(&ir.body[i], e)))) {
         return None;
     }
     let iter_cls = format!("{cls}::{}", if cst { "const_iterator" } else { "iterator" });
@@ -1115,7 +1102,7 @@ fn try_list_find(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<usize> {
     while k < tail.len() {
         if let Stmt::Assign { dst: Expr::Var(t), src } = &tail[k] {
             let t = *t;
-            if matches!(strip_casts(src), Expr::Var(y) if *y == p) && matches!(ir.vars[t].kind, VarKind::Local) && !ir.body[..=w].iter().any(|s| mentions(s, t)) {
+            if matches!(strip_casts(src), Expr::Var(y) if *y == p) && matches!(ir.vars[t].kind, VarKind::Local) && !ir.body[..=w].iter().any(|s| Stmt::uses_var(s, t)) {
                 let others = tail.iter().enumerate().any(|(i, s)| i != k && matches!(s, Stmt::Assign { dst: Expr::Var(y), .. } if *y == t || *y == p));
                 if !others {
                     tail.remove(k);
@@ -1168,7 +1155,7 @@ fn try_list_find(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<usize> {
         Expr::Load { base, .. } if is_p(base) => ok = false,
         _ => {}
     });
-    if !ok || end_var.is_some_and(|(e, _)| tail.iter().any(|s| mentions(s, e))) {
+    if !ok || end_var.is_some_and(|(e, _)| tail.iter().any(|s| Stmt::uses_var(s, e))) {
         return None;
     }
     let find = FuncSig { qualified_name: "rstl::find".into(), mangled: None, ret: it_ty.clone(), params: vec![], this_class: None, is_const: false, is_static: false, is_virtual: false, variadic: false, runs_code: false };
@@ -1205,7 +1192,7 @@ fn sink_param_reads(ir: &mut IrFunction, w: usize) -> usize {
             Expr::Member { base, .. } => matches!(&**base, Expr::Var(v) if matches!(ir.vars[*v].kind, VarKind::Param { .. })),
             _ => false,
         };
-        let only_loop = ir.vars[t].kind == VarKind::Local && ir.body.iter().enumerate().all(|(k, s)| k == i || k == w || !mentions(s, t));
+        let only_loop = ir.vars[t].kind == VarKind::Local && ir.body.iter().enumerate().all(|(k, s)| k == i || k == w || !Stmt::uses_var(s, t));
         let single = {
             let mut n = 0;
             Stmt::walk_exprs(&ir.body, &mut |e| n += matches!(e, Expr::Var(x) if *x == t) as usize);
@@ -1352,7 +1339,7 @@ fn try_index_loop(ir: &mut IrFunction, db: &TypeDb, w: usize) -> Option<()> {
         return None;
     }
     // (o, the data pointer and the bound local used nowhere else)
-    let others = |v: VarId, skip: &[usize]| ir.body.iter().enumerate().any(|(j, s)| j != w && !skip.contains(&j) && mentions(s, v));
+    let others = |v: VarId, skip: &[usize]| ir.body.iter().enumerate().any(|(j, s)| j != w && !skip.contains(&j) && Stmt::uses_var(s, v));
     if others(o, &[dof]) || others(b, &[db_]) || n_def.is_some_and(|(n, d)| others(n, &[d])) {
         return None;
     }

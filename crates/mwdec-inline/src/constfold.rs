@@ -140,7 +140,7 @@ fn binop(op: BinOp, a: V, b: V) -> Option<V> {
 
 /// Bind unbound hole `h` to constant `v` (typed as the hole).
 fn bind_const(m: &mut M, h: usize, v: i64) -> bool {
-    if m.b.get(h).map_or(true, |b| b.is_some()) {
+    if m.b.get(h).is_none_or(|b| b.is_some()) {
         return false;
     }
     let Some(HoleKind::Scalar(ty)) = m.t.holes.get(h) else { return false };

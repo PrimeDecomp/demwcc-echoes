@@ -364,7 +364,7 @@ impl<'t> Scanner<'t> {
                         Some(p) => {
                             // the declarator name before `(`, with `operator` joined
                             match toks[..p].iter().rposition(|t| *t == "operator") {
-                                Some(o) => toks[o..p].concat().replacen("operator", "operator", 1),
+                                Some(o) => toks[o..p].concat(),
                                 None => toks[..p].last().map(|s| s.to_string()).unwrap_or_default(),
                             }
                         }
@@ -728,7 +728,7 @@ impl<'t> Scanner<'t> {
 /// parentheses (C precedence).
 fn const_expr(toks: &[String]) -> Option<u32> {
     fn lit(s: &str) -> Option<u32> {
-        let s = s.trim_end_matches(|ch: char| matches!(ch, 'u' | 'U' | 'l' | 'L'));
+        let s = s.trim_end_matches(['u', 'U', 'l', 'L']);
         match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
             Some(h) => u32::from_str_radix(h, 16).ok(),
             None => s.parse::<u32>().ok(),

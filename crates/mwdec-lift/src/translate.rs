@@ -55,10 +55,10 @@ pub fn layout(sig: &FuncSig, has_this: bool, sret: bool, db: Option<&TypeDb>) ->
                 }
             }
             Type::Int { size: 8, .. } => {
-                if g % 2 == 0 {
+                if g.is_multiple_of(2) {
                     g += 1;
                 }
-                if g + 1 <= 10 {
+                if g < 10 {
                     g += 2;
                     ArgLoc::GprPair(g - 2)
                 } else {
@@ -210,46 +210,6 @@ fn is_addr_trivial(e: &Expr) -> bool {
         Expr::Load { base, .. } => matches!(**base, Expr::Var(_)) || matches!(&**base, Expr::AddrOf(b) if is_addr_trivial(b)),
         _ => false,
     }
-}
-
-/// Does `e` read the value of `v` (taking `&v` or `&v.member` does not)?
-pub fn reads_var(e: &Expr, v: VarId) -> bool {
-    match e {
-        Expr::Var(x) => *x == v,
-        Expr::AddrOf(inner) => match &**inner {
-            Expr::Var(_) => false,
-            Expr::Member { base, .. } if matches!(**base, Expr::Var(_)) => false,
-            other => reads_var_inner(other, v),
-        },
-        other => reads_var_inner(other, v),
-    }
-}
-
-fn reads_var_inner(e: &Expr, v: VarId) -> bool {
-    let mut found = false;
-    let mut f = |x: &Expr| {
-        if reads_var_shallow(x, v) {
-            found = true;
-        }
-    };
-    match e {
-        Expr::AddrOf(_) | Expr::Var(_) => return reads_var(e, v),
-        _ => {}
-    }
-    // check children via recursion on immediate sub-expressions
-    match e {
-        Expr::Load { base, .. } | Expr::Member { base, .. } | Expr::BitField { base, .. } => return reads_var(base, v) || matches!(e, Expr::Member { base, .. } if matches!(**base, Expr::Var(x) if x == v)),
-        Expr::Unary { e: x, .. } | Expr::Cast { e: x, .. } => return reads_var(x, v),
-        Expr::Binary { l, r, .. } => return reads_var(l, v) || reads_var(r, v),
-        Expr::Index { base, index, .. } => return reads_var(base, v) || reads_var(index, v),
-        _ => {}
-    }
-    e.walk(&mut f);
-    found
-}
-
-fn reads_var_shallow(e: &Expr, v: VarId) -> bool {
-    matches!(e, Expr::Var(x) if *x == v)
 }
 
 pub fn reads_mem(e: &Expr) -> bool {
@@ -514,7 +474,7 @@ impl<'a> Lifter<'a> {
     /// GPR parameter register under the "member" layout is never read before being written.
     fn guess_static(&self) -> bool {
         // (a class the context only declares (`class C;`) doesn't say which members are static)
-        if self.db.map_or(false, |db| crate::sig::find_class(db, self.sig.this_class.as_deref().unwrap_or("")).is_some_and(|c| !c.is_declaration)) {
+        if self.db.is_some_and(|db| crate::sig::find_class(db, self.sig.this_class.as_deref().unwrap_or("")).is_some_and(|c| !c.is_declaration)) {
             return false; // the DB would have set is_static
         }
         if sig::is_ctor(&self.sig) || sig::is_dtor(&self.sig) || self.sig.is_const {
@@ -624,7 +584,7 @@ impl<'a> Lifter<'a> {
         // a function of the unit the context doesn't declare (a mangled name has no return
         // type), called with one argument register more than its parameters and a frame
         // address in r3: an object returned by value into that frame object
-        if !sret && sig::ret_unknown(&s) && sig::demangle(&r.target).is_some() && s.this_class.is_none() && !self.db.map_or(false, |db| db.decls.contains_key(&s.qualified_name) || db.functions.contains_key(&r.target)) {
+        if !sret && sig::ret_unknown(&s) && sig::demangle(&r.target).is_some() && s.this_class.is_none() && !self.db.is_some_and(|db| db.decls.contains_key(&s.qualified_name) || db.functions.contains_key(&r.target)) {
             let lay0 = layout(&s, false, false, self.db);
             let gpr_params = lay0.params.iter().all(|l| matches!(l, ArgLoc::Gpr(_)));
             let next = 3 + lay0.params.len() as u8;
@@ -637,7 +597,7 @@ impl<'a> Lifter<'a> {
             }
         }
         let mut has_this = s.this_class.is_some() && !s.is_static;
-        if has_this && self.db.map_or(true, |db| crate::sig::find_class(db, s.this_class.as_deref().unwrap()).is_none()) {
+        if has_this && self.db.is_none_or(|db| crate::sig::find_class(db, s.this_class.as_deref().unwrap()).is_none()) {
             // guess: member if the register after the last explicit param was set in this block
             let lay = layout(&s, true, sret, self.db);
             let last_g = lay.params.iter().rev().find_map(|l| if let ArgLoc::Gpr(r) = l { Some(*r) } else { None });
@@ -651,7 +611,7 @@ impl<'a> Lifter<'a> {
             }
         }
         let mut lay = layout(&s, has_this, sret, self.db);
-        if s.variadic && !lay.params.iter().any(|p| *p == ArgLoc::Stack) {
+        if s.variadic && !lay.params.contains(&ArgLoc::Stack) {
             // the variadic part: argument registers set up for this call after the named ones
             // (marked `...`; dropped from the callee's signature once the arguments are read);
             // float ones only when the caller sets cr1eq (`creqv 6,6,6`)
@@ -711,7 +671,7 @@ impl<'a> Lifter<'a> {
             }
             for &r in &d {
                 if (4..=11).contains(&r) && !self.reg_set_for_call(k, r) {
-                    higher.push(r as u8);
+                    higher.push(r);
                 }
             }
         }
@@ -996,21 +956,9 @@ impl<'a> Lifter<'a> {
         preds.iter().all(|&p| self.reg_written_on_paths(p, self.cfg.blocks[p].end, reg, depth - 1))
     }
 
+    /// Is `reg` written in `k`'s block before `k` (after its last call)?
     fn reg_written_in_block(&self, k: usize, reg: Reg) -> bool {
-        let b = self.cfg.block_of[k];
-        let start = self.cfg.blocks[b].start;
-        let mut j = k;
-        while j > start {
-            j -= 1;
-            let i = &self.insns[j];
-            if i.is_call() || i.is_bctrl() {
-                return false;
-            }
-            if !self.frame.skip.contains(&j) && defs_uses(i).0.contains(&reg) {
-                return true;
-            }
-        }
-        false
+        self.reg_written_on_paths(self.cfg.block_of[k], k, reg, 0)
     }
 
     /// Precise uses of an instruction (narrowing calls/returns).
@@ -1672,11 +1620,11 @@ impl<'a> Lifter<'a> {
             let lfd = a.sizes.iter().any(|s| s.0 == 8 && s.1 && !s.2);
             let stfd = a.sizes.iter().any(|s| s.0 == 8 && s.1 && s.2);
             let lo = acc.get(&(o + 4));
-            if lfd && a.sizes.iter().any(|s| s.0 == 4 && !s.1 && s.2) && lo.map_or(false, |l| l.sizes.iter().any(|s| s.2)) {
+            if lfd && a.sizes.iter().any(|s| s.0 == 4 && !s.1 && s.2) && lo.is_some_and(|l| l.sizes.iter().any(|s| s.2)) {
                 conv.insert(o);
                 conv.insert(o + 4);
             }
-            if stfd && lo.map_or(false, |l| l.sizes.iter().any(|s| !s.2 && !s.1)) {
+            if stfd && lo.is_some_and(|l| l.sizes.iter().any(|s| !s.2 && !s.1)) {
                 conv.insert(o);
                 conv.insert(o + 4);
             }
@@ -1707,7 +1655,7 @@ impl<'a> Lifter<'a> {
         // objects whose interior addresses are passed on (elements, members by reference)
         let mut with_interior: HashSet<i32> = HashSet::new();
         for &o in &addr {
-            if o < covered_to && !sret_addr.contains(&o) && !receiver_addr.contains(&o) && obj_size.get(&o).map_or(true, |&sz| o + sz as i32 <= covered_to) {
+            if o < covered_to && !sret_addr.contains(&o) && !receiver_addr.contains(&o) && obj_size.get(&o).is_none_or(|&sz| o + sz as i32 <= covered_to) {
                 // (an interior address handed to a call as an object: an element or a member)
                 if let (Some(&st), true) = (starts.last(), obj_size.contains_key(&o)) {
                     with_interior.insert(st);
@@ -1877,7 +1825,7 @@ impl<'a> Lifter<'a> {
             for j in from..self.cfg.blocks[b].end {
                 let i = &self.insns[j];
                 if i.is_call() || (i.is_jump() && i.reloc.is_some()) {
-                    return self.call_layouts.get(&j).map_or(false, |(sg, lay, _)| role(sg, lay));
+                    return self.call_layouts.get(&j).is_some_and(|(sg, lay, _)| role(sg, lay));
                 }
                 if i.is_bctrl() || defs_uses(i).0.contains(&gpr(rd)) {
                     return false;
@@ -1998,7 +1946,7 @@ impl<'a> Lifter<'a> {
         if let Some(&v) = self.stack.slots.get(&off) {
             // the same slot read as another type (float bits as int, ...): reinterpret in memory
             let vt = self.vars[v].ty.clone();
-            if (is_float(&vt) != is_float(&ty) && scalar_size(&vt) == scalar_size(&ty)) || (scalar_size(&ty).is_some() && scalar_size(&vt).map_or(false, |s| s > 0) && scalar_size(&vt) != scalar_size(&ty) && !matches!(vt, Type::Unknown { .. })) {
+            if (is_float(&vt) != is_float(&ty) && scalar_size(&vt) == scalar_size(&ty)) || (scalar_size(&ty).is_some() && scalar_size(&vt).is_some_and(|s| s > 0) && scalar_size(&vt) != scalar_size(&ty) && !matches!(vt, Type::Unknown { .. })) {
                 return Some(Expr::Member { base: Box::new(Expr::Var(v)), offset: 0, ty });
             }
             return Some(Expr::Var(v));
@@ -2188,7 +2136,7 @@ impl<'a> Lifter<'a> {
 
     /// Address of symbol+addend as an expression.
     fn sym_addr(&mut self, sym: &str, addend: i64) -> Expr {
-        if self.obj.functions.iter().any(|f| f.name == sym) || (!self.obj.data.contains_key(sym) && sig::demangle(sym).map_or(false, |d| d.contains('('))) {
+        if self.obj.functions.iter().any(|f| f.name == sym) || (!self.obj.data.contains_key(sym) && sig::demangle(sym).is_some_and(|d| d.contains('('))) {
             self.note_global(sym, &Type::Void, true);
             return Expr::FuncAddr { symbol: sym.to_string() };
         }
@@ -2196,7 +2144,7 @@ impl<'a> Lifter<'a> {
             if let Some(d) = self.obj.data.get(sym) {
                 if matches!(d.section.as_str(), ".rodata" | ".data" | ".sdata" | ".sdata2") {
                     if let Some(s) = mwdec_obj::c_string_at(self.obj, sym, addend) {
-                        let printable = !s.is_empty() && s.iter().all(|&c| c >= 0x20 && c < 0x7f || c == b'\n' || c == b'\t');
+                        let printable = !s.is_empty() && s.iter().all(|&c| (0x20..0x7f).contains(&c) || c == b'\n' || c == b'\t');
                         // a small literal object that is exactly one string (`"dvdfs.c"` in .sdata)
                         let lone = addend == 0 && d.size as usize == s.len() + 1;
                         let is_strpool = sym.contains("stringBase") || d.section == ".rodata" || d.section == ".data" || lone;
@@ -2334,7 +2282,7 @@ impl<'a> Lifter<'a> {
     fn member(&mut self, base: Expr, off: i32, ty: Type) -> Expr {
         // an extern of unknown size read at its start is a scalar of the access type
         if let Expr::Global { symbol, ty: Type::Unknown { size: 0 } } = &base {
-            if off == 0 && scalar_size(&ty).map_or(false, |s| s > 0) {
+            if off == 0 && scalar_size(&ty).is_some_and(|s| s > 0) {
                 return Expr::Global { symbol: symbol.clone(), ty };
             }
         }
@@ -2478,7 +2426,7 @@ impl<'a> Lifter<'a> {
                 let home_is_volatile = n
                     .strip_prefix("temp_")
                     .and_then(|r| r[1..].split('_').next().and_then(|d| d.parse::<u8>().ok()))
-                    .map_or(false, |d| d < 14);
+                    .is_some_and(|d| d < 14);
                 if home_is_volatile {
                     self.vars[t].name = format!("temp_{}", reg_name(reg));
                 }
@@ -2499,7 +2447,7 @@ impl<'a> Lifter<'a> {
             return;
         }
         let uses = self.use_count.get(&site).copied().unwrap_or(0);
-        let cross = self.use_blocks.get(&site).map_or(false, |s| s.iter().any(|&b| b != self.cfg.block_of[k]));
+        let cross = self.use_blocks.get(&site).is_some_and(|s| s.iter().any(|&b| b != self.cfg.block_of[k]));
         // a member address kept in a callee-saved register (`addi r31, r30, 4` read after
         // calls) was a local in the source (`T& m = obj.GetMember();`):
         // re-evaluated at each use it would be recomputed in a volatile register
@@ -2651,7 +2599,7 @@ impl<'a> Lifter<'a> {
 
     /// A C function the context has no prototype for (its parameters are read off each call).
     fn unprototyped_c(&self, target: &str) -> bool {
-        sig::demangle(target).is_none() && !self.db.map_or(false, |db| db.decls.contains_key(target) || db.functions.contains_key(target)) && sig_of(target, self.db).params.is_empty()
+        sig::demangle(target).is_none() && !self.db.is_some_and(|db| db.decls.contains_key(target) || db.functions.contains_key(target)) && sig_of(target, self.db).params.is_empty()
     }
 
     /// Calls of one unprototyped C function all pass the same parameters (one prototype): a
@@ -2698,7 +2646,7 @@ impl<'a> Lifter<'a> {
         if sig::demangle(&self.f.name).is_some() || !self.sig.params.is_empty() {
             return;
         }
-        if self.db.map_or(false, |db| db.decls.contains_key(&self.f.name) || db.functions.contains_key(&self.f.name)) {
+        if self.db.is_some_and(|db| db.decls.contains_key(&self.f.name) || db.functions.contains_key(&self.f.name)) {
             return;
         }
         for k in 0..self.insns.len() {
@@ -2723,7 +2671,7 @@ impl<'a> Lifter<'a> {
         if self.param_home_slots && fmax.is_none() && self.frame.info.size > 0 {
             if let Some(lo) = self.lowest_local_offset() {
                 let slots = ((lo - 8) / 4) as u8;
-                if (1..=8).contains(&slots) && gmax.map_or(true, |g| g - 2 < slots) {
+                if (1..=8).contains(&slots) && gmax.is_none_or(|g| g - 2 < slots) {
                     gmax = Some(2 + slots);
                 }
             } else {
@@ -2887,7 +2835,7 @@ impl<'a> Lifter<'a> {
             if defs.is_empty() {
                 continue;
             }
-            if r >= 64 && r < 72 {
+            if (64..72).contains(&r) {
                 // CR field: single reaching def
                 if defs.len() == 1 && defs[0] != ENTRY {
                     if let Some(vals) = self.cr_value.get(&(defs[0] * 8 + (r as u32 - 64))) {
@@ -3257,7 +3205,7 @@ impl<'a> Lifter<'a> {
         let rreg = if is_float(&types::resolve(self.db, &ret_ty)) { fpr(1) } else { gpr(3) };
         // a callee without a known prototype whose r4 is read afterwards returns a 64-bit value
         let r4_read = self.use_count.get(&(k as u32, gpr(4))).copied().unwrap_or(0) > 0 || self.web_var.contains_key(&(k as u32, gpr(4)));
-        let proto_known = !sig::ret_unknown(&sig) && self.db.map_or(false, |db| db.decls.contains_key(&sym) || db.functions.contains_key(&sym) || sig::demangle(&sym).is_some());
+        let proto_known = !sig::ret_unknown(&sig) && self.db.is_some_and(|db| db.decls.contains_key(&sym) || db.functions.contains_key(&sym) || sig::demangle(&sym).is_some());
         if crate::wide::is_wide(&types::resolve(self.db, &ret_ty)) || (r4_read && !proto_known && !matches!(ret_ty, Type::Void) && rreg == gpr(3)) {
             let call = match call {
                 Expr::Call { callee, args, .. } => Expr::Call { callee, args, ret: Type::Int { size: 8, signed: true } },
@@ -3300,23 +3248,23 @@ impl<'a> Lifter<'a> {
                 if matches!(self.vars[v].ty, Type::Unknown { .. }) {
                     let ts = types::size_of(self.db, t);
                     // an uninitialised local of class type needs a default constructor
-                    let default_ok = self.db.map_or(true, |db| {
+                    let default_ok = self.db.is_none_or(|db| {
                         let cls = named(t).unwrap_or("");
-                        let key = format!("{}::{}", strip_tmpl(cls), strip_tmpl(sig::split_scope(cls).1));
+                        let key = format!("{}::{}", crate::sig::strip_tmpl(cls), crate::sig::strip_tmpl(sig::split_scope(cls).1));
                         // a user-provided default constructor with effects (`TAreaId() :
                         // value(-1) {}`) would add code the target doesn't have
                         match db.decls.get(&key) {
                             Some(ds) => ds.iter().any(|d| {
                                 d.params.is_empty()
                                     && d.is_inline_defined
-                                    && d.inline_body.as_deref().map_or(true, |b| b.trim().is_empty())
+                                    && d.inline_body.as_deref().is_none_or(|b| b.trim().is_empty())
                                     && d.init_list.is_none()
                             }),
                             None => true,
                         }
                     });
                     // a constructor call declares the object with its class type whatever the region guess
-                    if (constructed || ts.map_or(true, |s| s <= size)) && (default_ok || constructed) {
+                    if (constructed || ts.is_none_or(|s| s <= size)) && (default_ok || constructed) {
                         self.vars[v].ty = t.clone();
                     }
                 }
@@ -3348,7 +3296,7 @@ impl<'a> Lifter<'a> {
         if !self.param_home_slots {
             return;
         }
-        if sig::demangle(sym).is_some() || self.db.map_or(false, |db| db.decls.contains_key(sym) || db.functions.contains_key(sym)) || lay.this.is_some() || lay.sret.is_some() {
+        if sig::demangle(sym).is_some() || self.db.is_some_and(|db| db.decls.contains_key(sym) || db.functions.contains_key(sym)) || lay.this.is_some() || lay.sret.is_some() {
             return;
         }
         if sig.params.len() != lay.params.len() || sig.params.iter().any(|p| p.name.is_some() || p.ty != t_s32()) && !sig.params.iter().all(|p| matches!(p.ty, Type::Float { .. }) || p.ty == t_s32()) {
@@ -3374,7 +3322,7 @@ impl<'a> Lifter<'a> {
                         let xt = types::ty_of(&x, &self.vars);
                         lay.params.splice(n..n + 2, [ArgLoc::GprPair(r)]);
                         sig.params.splice(n..n + 2, [mwdec_core::Param { name: None, ty: if crate::wide::is_wide(&xt) { xt } else { Type::Int { size: 8, signed: true } } }]);
-                        if n > 0 && lay.params[n - 1] == ArgLoc::Gpr(r - 1) && r - 1 >= 4 {
+                        if n > 0 && lay.params[n - 1] == ArgLoc::Gpr(r - 1) && r > 4 {
                             let prev = self.get(st, gpr(r - 1));
                             let prev = self.resolve_temps(&prev);
                             if crate::wide::as_lo(&prev, &self.vars).is_some() {
@@ -3677,7 +3625,7 @@ impl<'a> Lifter<'a> {
             // the last definition of the return register in each predecessor
             let last_li = |p: usize, me: &Self| -> bool {
                 let pb = &me.cfg.blocks[p];
-                (pb.start..pb.end).rev().find(|&k| !me.frame.skip.contains(&k) && defs_uses(&me.insns[k]).0.contains(&rr)).map_or(false, |k| {
+                (pb.start..pb.end).rev().find(|&k| !me.frame.skip.contains(&k) && defs_uses(&me.insns[k]).0.contains(&rr)).is_some_and(|k| {
                     let i = &me.insns[k];
                     matches!(i.op(), Opcode::Addi) && i.ra() == 0 || matches!(i.op(), Opcode::Lfs)
                 })
@@ -3957,7 +3905,7 @@ impl<'a> Lifter<'a> {
                     // int -> float through a quantized load of a value stored for it (as wide as
                     // the quantized type: a wider store is an object's bytes read back)
                     let qsize = quant_type(q).and_then(|t| scalar_size(&t));
-                    if let Some((sz, v)) = st.mem.get(&off).cloned().or_else(|| self.dominating_slot_store(off, k)).filter(|(sz, _)| qsize.map_or(true, |q| q == *sz)) {
+                    if let Some((sz, v)) = st.mem.get(&off).cloned().or_else(|| self.dominating_slot_store(off, k)).filter(|(sz, _)| qsize.is_none_or(|q| q == *sz)) {
                         let _ = sz;
                         self.def(st, k, fpr(ins.field_frd()), Expr::cast(t_f32(), v));
                         return;
@@ -4437,7 +4385,7 @@ impl<'a> Lifter<'a> {
                 // inserting a compare result (`subf; cntlzw` rotated so its bit 5 lands in a
                 // one-bit field): the value is `__cntlzw(x) >> 5` (`a == b`) shifted into place
                 let is_clz = |e: &Expr| matches!(e, Expr::Call { callee: Callee::Direct { symbol, .. }, .. } if symbol == "__cntlzw");
-                let clz = is_clz(&s) || matches!(&s, Expr::Var(t) if self.temp_def.get(t).is_some_and(|d| is_clz(d)));
+                let clz = is_clz(&s) || matches!(&s, Expr::Var(t) if self.temp_def.get(t).is_some_and(is_clz));
                 let s = match &s {
                     _ if clz && mb == me && (sh as u32 + 5) % 32 == 31 - mb as u32 => {
                         sh = 31 - mb;
@@ -4715,7 +4663,7 @@ impl<'a> Lifter<'a> {
                 self.warn(format!("unhandled {} at {:#x}", i.text(), i.off));
                 let (d, _) = defs_uses(i);
                 for r in d {
-                    let ty = if r >= 32 && r < 64 { t_f32() } else { t_unk(4) };
+                    let ty = if (32..64).contains(&r) { t_f32() } else { t_unk(4) };
                     self.def(st, k, r, Expr::Unknown { text: i.text(), ty });
                 }
             }
@@ -4875,20 +4823,6 @@ impl Term {
     }
 }
 
-fn strip_tmpl(s: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0;
-    for c in s.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Demangled parameter spellings, exactly as in the symbol.
 /// Parameters the header declares with a top-level `const` (by-value scalars), when exactly one
 /// declaration fits the signature.
@@ -4978,7 +4912,7 @@ fn zero_bits<'d>(e: &Expr, vars: &[Var], def: &dyn Fn(VarId) -> Option<&'d Expr>
                 _ => 0,
             },
             // (the compiler doesn't look through the insert intrinsic)
-            Expr::Var(t) => def(*t).map_or(0, |d| zb(d)),
+            Expr::Var(t) => def(*t).map_or(0, zb),
             _ => 0,
         }
 }

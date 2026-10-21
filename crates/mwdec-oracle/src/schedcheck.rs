@@ -667,7 +667,8 @@ fn decode(obj: &Obj, f: &Func, stack: Option<&[StackObject]>) -> Vec<I> {
         })
         .collect();
     let rel_at: BTreeMap<u32, &asm::Rel> = f.relocs.iter().map(|r| (r.offset & !3, r)).collect();
-    let lit_re = regex::Regex::new(r"@\d+|lbl_[0-9A-Fa-f]+|\.L_[0-9a-f]+").unwrap();
+    static LIT_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"@\d+|lbl_[0-9A-Fa-f]+|\.L_[0-9a-f]+").unwrap());
+    let lit_re = &*LIT_RE;
     let mems = classify_memory(f, stack);
     let frames = frame_flags(&raw_facts(f));
     let mut out = vec![];

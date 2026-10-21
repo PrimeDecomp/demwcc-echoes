@@ -17,6 +17,7 @@ pub mod regalloc;
 /// The list scheduler, observed (mwcc-trace's model).
 pub use mwcc_trace::sched;
 pub mod schedcheck;
+pub mod testgen;
 pub mod tracer;
 pub mod variants;
 pub mod wasm;

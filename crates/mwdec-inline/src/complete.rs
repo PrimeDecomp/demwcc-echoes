@@ -166,7 +166,7 @@ pub fn complete_instances(db: &mut TypeDb, context: &str, cflags: &[String], com
                 }
                 Err(msg) => {
                     let lines = crate::probe::error_lines(&msg);
-                    if std::env::var("MWDI_TRACE_COMPLETE").is_ok() {
+                    if env_flag!("MWDI_TRACE_COMPLETE") {
                         eprintln!("complete: {} lines, error lines {lines:?}: {}", set.len(), msg.chars().take(600).collect::<String>());
                     }
                     let before = set.len();
@@ -189,7 +189,7 @@ pub fn complete_instances(db: &mut TypeDb, context: &str, cflags: &[String], com
     settle(all, &mut keep, &render, compile, 0);
     let ok = keep.iter().any(|k| *k);
     if !ok {
-        if std::env::var("MWDI_DEBUG").is_ok() {
+        if env_flag!("MWDI_DEBUG") {
             eprintln!("complete instances: {} incomplete, instantiation TU does not compile", names.len());
         }
         return 0;
@@ -200,7 +200,7 @@ pub fn complete_instances(db: &mut TypeDb, context: &str, cflags: &[String], com
     let db2 = match mwdec_ctx::build_typedb(&full, cflags, &mwdec_ctx::default_work_dir()) {
         Ok(d) => d,
         Err(e) => {
-            if std::env::var("MWDI_DEBUG").is_ok() {
+            if env_flag!("MWDI_DEBUG") {
                 eprintln!("complete instances: -g build failed: {e}");
             }
             return 0;
@@ -240,7 +240,7 @@ pub fn complete_instances(db: &mut TypeDb, context: &str, cflags: &[String], com
         }
     }
     mwdec_ctx::resolve::fill_methods(db);
-    if std::env::var("MWDI_DEBUG").is_ok() {
+    if env_flag!("MWDI_DEBUG") {
         eprintln!("complete instances: {} incomplete, {} compiled, {n} completed, {:.1}s", names.len(), keep.iter().filter(|k| **k).count(), t0.elapsed().as_secs_f64());
     }
     n

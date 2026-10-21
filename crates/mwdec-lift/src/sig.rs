@@ -52,6 +52,22 @@ pub fn split_top(s: &str, sep: char) -> Vec<String> {
     out
 }
 
+/// `s` without its template arguments (`TToken<CTexture>::TToken` -> `TToken::TToken`). For
+/// class and member names: `<` and `>` of operator names are taken as brackets too.
+pub fn strip_tmpl(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Split a qualified name at the last top-level `::` -> (scope, last).
 pub fn split_scope(q: &str) -> (Option<&str>, &str) {
     let b = q.as_bytes();
@@ -201,7 +217,7 @@ fn is_namespace_guess(scope: &str, db: Option<&TypeDb>) -> bool {
         return true;
     }
     // Project namespaces are lower-case (`rstl`, `std`, `nl`); classes are `CFoo`/`SFoo`/`TFoo`.
-    last.chars().next().map_or(false, |c| c.is_ascii_lowercase()) && !last.contains('<')
+    last.chars().next().is_some_and(|c| c.is_ascii_lowercase()) && !last.contains('<')
 }
 
 /// Find a class in the TypeDb by (qualified) name, tolerating spacing differences.

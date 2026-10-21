@@ -405,12 +405,12 @@ pub fn narrow(body: &mut Vec<Stmt>, vars: &mut [Var], db: Option<&mwdec_core::Ty
 /// function, passed as a `bool`/pointer parameter, assigned to/from a typed lvalue), every
 /// access takes that type, so the extern declaration matches (`bool`, `CFoo*`).
 pub fn global_types(body: &mut Vec<Stmt>, vars: &[Var], ret: &Type, db: Option<&mwdec_core::TypeDb>) {
-    let undeclared = |s: &str| db.map_or(true, |db| !db.globals.contains_key(s));
+    let undeclared = |s: &str| db.is_none_or(|db| !db.globals.contains_key(s));
     let mut expect: HashMap<String, Vec<Type>> = HashMap::new();
     let mut bad: Vec<String> = vec![];
     let gsym = |e: &Expr| -> Option<String> {
         match e {
-            Expr::Global { symbol, ty } if scalar_size(ty).map_or(false, |s| s > 0) && undeclared(symbol) => Some(symbol.clone()),
+            Expr::Global { symbol, ty } if scalar_size(ty).is_some_and(|s| s > 0) && undeclared(symbol) => Some(symbol.clone()),
             _ => None,
         }
     };
@@ -560,13 +560,7 @@ pub fn forward_global_pointers(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bo
     let mut uses = HashMap::new();
     crate::inline::count_uses(body, &mut uses);
     let mut defs: HashMap<VarId, usize> = HashMap::new();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for s in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = s {
-                *defs.entry(*v).or_default() += 1;
-            }
-        }
-    });
+    crate::inline::count_defs(body, &mut defs);
     fn count(s: &Stmt, t: VarId) -> usize {
         let mut n = 0;
         Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
@@ -649,12 +643,6 @@ pub fn forward_global_pointers(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bo
 
 /// `if (p) delete p;` -> `delete p;` (the delete expression has its own null check).
 pub fn fold_delete_checks(body: &mut Vec<Stmt>) {
-    fn strip(e: &Expr) -> &Expr {
-        match e {
-            Expr::Cast { e, .. } => strip(e),
-            e => e,
-        }
-    }
     Stmt::for_each_block_mut(body, &mut |b| {
         for s in b.iter_mut() {
             let Stmt::If { cond, then, els } = s else { continue };
@@ -665,9 +653,9 @@ pub fn fold_delete_checks(body: &mut Vec<Stmt>) {
             if symbol != "__delete" || args.len() != 1 {
                 continue;
             }
-            let p = strip(&args[0]);
-            let tested = match strip(cond) {
-                Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) => strip(l),
+            let p = strip_casts(&args[0]);
+            let tested = match strip_casts(cond) {
+                Expr::Binary { op: BinOp::Ne, l, r, .. } if r.as_int() == Some(0) => strip_casts(l),
                 other => other,
             };
             if tested == p {
@@ -721,7 +709,7 @@ pub fn undeclared_returns(body: &mut Vec<Stmt>, ret: &Type, db: Option<&mwdec_co
         // (also a C++ function called without an object that the context doesn't declare,
         // `ns::f()` or a static member of an unknown class: its mangled name has no return type)
         let free = crate::sig::demangle(sym).is_none() || (!crate::sig::is_ctor(s) && !crate::sig::is_dtor(s) && !s.qualified_name.contains('<'));
-        crate::sig::ret_unknown(s) && free && !db.map_or(false, known)
+        crate::sig::ret_unknown(s) && free && !db.is_some_and(known)
     };
     let narrow = |t: &Type| -> Option<Type> {
         let r = types::resolve(db, t).into_owned();
@@ -841,7 +829,7 @@ pub fn bool_call_results(body: &mut Vec<Stmt>, vars: &[Var], ret: &Type, db: Opt
         let Expr::Call { callee, ret, .. } = e else { return false };
         let unk = match callee {
             Callee::Direct { sig, .. } | Callee::Method { sig, .. } => crate::sig::ret_unknown(sig),
-            Callee::Virtual { sig, .. } => sig.as_ref().map_or(true, crate::sig::ret_unknown),
+            Callee::Virtual { sig, .. } => sig.as_ref().is_none_or(crate::sig::ret_unknown),
             Callee::Indirect(_) => false,
         };
         unk && matches!(strip_cv(ret), Type::Unknown { size: 4 } | Type::Int { size: 1 | 4, .. })
@@ -1050,7 +1038,7 @@ pub fn pointer_returns(body: &mut Vec<Stmt>, vars: &mut [Var], ret: &mut Type) {
     let mut cand: Option<VarId> = None;
     let mut ok = !rets.is_empty();
     let mut tested = false;
-    let mut note = |v: VarId, cand: &mut Option<VarId>, ok: &mut bool| match cand {
+    let note = |v: VarId, cand: &mut Option<VarId>, ok: &mut bool| match cand {
         None => *cand = Some(v),
         Some(c) if *c == v => {}
         _ => *ok = false,
@@ -1119,19 +1107,12 @@ pub fn signed_compare_values(body: &mut Vec<Stmt>, vars: &mut [Var]) {
             }
         });
     }
-    let strip = |e: &Expr| -> Expr {
-        let mut e = e;
-        while let Expr::Cast { e: i, .. } = e {
-            e = i;
-        }
-        e.clone()
-    };
     let resolve = |e: &Expr| -> Expr {
-        let e = strip(e);
+        let e = strip_casts(e).clone();
         if let Expr::Var(v) = &e {
             if let Some((1, d)) = defs.get(v) {
                 if matches!(vars[*v].kind, VarKind::Local) {
-                    return strip(d);
+                    return strip_casts(d).clone();
                 }
             }
         }
@@ -1147,17 +1128,17 @@ pub fn signed_compare_values(body: &mut Vec<Stmt>, vars: &mut [Var]) {
         if !matches!(types::ty_of(l, vars), Type::Int { signed: false, .. }) {
             return;
         }
-        let Expr::Binary { op: BinOp::Sub, l: a, r: b, .. } = strip(l) else { return };
-        let Expr::Binary { op: BinOp::Shr, l: t1, r: one, .. } = strip(&a) else { return };
+        let Expr::Binary { op: BinOp::Sub, l: a, r: b, .. } = strip_casts(l) else { return };
+        let Expr::Binary { op: BinOp::Shr, l: t1, r: one, .. } = strip_casts(&a) else { return };
         if one.as_int() != Some(1) || matches!(types::ty_of(&t1, vars), Type::Int { signed: false, .. }) {
             return;
         }
-        let Expr::Binary { op: BinOp::And, l: t2, r: z, .. } = strip(&b) else { return };
+        let Expr::Binary { op: BinOp::And, l: t2, r: z, .. } = strip_casts(&b) else { return };
         let (t2, z) = if resolve(&t2) == resolve(&t1) { (t2, z) } else if resolve(&z) == resolve(&t1) { (z, t2) } else { return };
         let _ = t2;
         let Expr::Binary { op: BinOp::Xor, l: x, r: y, .. } = resolve(&t1) else { return };
-        let zr = strip(&z);
-        let (big, small) = if strip(&x) == zr { (x, y) } else if strip(&y) == zr { (y, x) } else { return };
+        let zr = strip_casts(&z);
+        let (big, small) = if strip_casts(&x) == zr { (x, y) } else if strip_casts(&y) == zr { (y, x) } else { return };
         *e = Expr::cmp(BinOp::Gt, (*big).clone(), (*small).clone());
         changed = true;
     });

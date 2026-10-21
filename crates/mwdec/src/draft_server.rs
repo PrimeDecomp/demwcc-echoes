@@ -172,7 +172,7 @@ pub fn serve(root: &Path, work: &Path, no_db: bool) -> Result<()> {
         let symbol = req.get("symbol").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let include_implicit = req.get("include_implicit").and_then(|x| x.as_bool()).unwrap_or(false);
         let lift_emitted = req.get("lift_emitted").and_then(|x| x.as_bool()).unwrap_or(false);
-        if cur.as_ref().map_or(true, |c| c.0 != unit) {
+        if cur.as_ref().is_none_or(|c| c.0 != unit) {
             let t = std::time::Instant::now();
             drop(cur.take()); // drop the previous unit before loading the next
             let ui = find_unit(&p, &unit).map_err(|e| e.to_string()).and_then(|u| {
@@ -251,10 +251,6 @@ pub fn draft_children(jobs: usize) -> usize {
 }
 
 impl DraftClient {
-    pub fn new(root: &Path, work: &Path, no_db: bool) -> DraftClient {
-        DraftClient::with_children(root, work, no_db, 1)
-    }
-
     pub fn with_children(root: &Path, work: &Path, no_db: bool, children: usize) -> DraftClient {
         // (`MWDEC_DRAFT_TIMEOUT` seconds per request; the first request of a unit builds its
         // types and inline library in the child, so the default is generous)

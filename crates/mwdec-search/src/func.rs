@@ -219,9 +219,6 @@ pub struct Effects {
 }
 
 impl Effects {
-    pub fn has_side_effects(&self) -> bool {
-        self.mem_write || !self.writes.is_empty() || self.control
-    }
     pub fn conflicts(&self, o: &Effects) -> bool {
         if self.control || o.control {
             return true;

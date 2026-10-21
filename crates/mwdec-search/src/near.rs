@@ -3,18 +3,7 @@
 //! statement whose code the target doesn't have (an explicit store an implicit member constructor
 //! already does). Same contract as [`crate::ops`]; the strict comparator is the judge.
 use crate::cst::{strip_parens, Cst, Edit};
-use crate::func;
-use crate::ops::M;
-
-fn indent_of(cst: &Cst, n: usize) -> String {
-    let s = cst.nodes[n].start;
-    let ls = cst.src[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    cst.src[ls..s].chars().take_while(|c| c.is_whitespace()).collect()
-}
-
-fn stmts(c: &Cst, block: usize) -> Vec<usize> {
-    c.named(block).into_iter().filter(|&s| func::is_stmt(c.kind(s))).collect()
-}
+use crate::ops::{cond_value, indent_of, pure, remove_stmt, single, stmts_of, M};
 
 /// Last name component of a call's function expression (`rstl::min_val<float>` -> `min_val`).
 fn callee_name(c: &Cst, call: usize) -> Option<String> {
@@ -56,15 +45,6 @@ fn ret_value(c: &Cst, s: usize) -> Option<usize> {
     (c.kind(s) == "return_statement").then(|| c.named(s).first().copied()).flatten()
 }
 
-fn single(c: &Cst, n: usize) -> Option<usize> {
-    if c.kind(n) == "compound_statement" {
-        let v = stmts(c, n);
-        (v.len() == 1).then(|| v[0])
-    } else {
-        Some(n)
-    }
-}
-
 /// Single exit through a result variable (the target branches to one shared epilogue / `blr`):
 /// `return c ? a : b;`, `if (c) return a; else return b;` and `if (c) return a; return b;` at the
 /// end of the body become `T r; if (c) { r = a; } else { r = b; } return r;` (and back:
@@ -76,7 +56,7 @@ pub fn op_ret_var(m: &mut M) -> Option<Vec<Edit>> {
         return None;
     }
     let body = m.info.body;
-    let l = stmts(c, body);
+    let l = stmts_of(c, body);
     let mut cands: Vec<(usize, usize, String, String, String)> = Vec::new(); // (first, last, cond, a, b)
     if let Some(&last) = l.last() {
         // return c ? a : b;
@@ -117,17 +97,6 @@ pub fn op_ret_var(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit { start: c.nodes[first].start, end: c.nodes[last].end, text }])
 }
 
-fn cond_value(c: &Cst, stmt: usize) -> Option<usize> {
-    let cc = c.child(stmt, "condition")?;
-    match c.kind(cc) {
-        "condition_clause" => {
-            let v = c.child(cc, "value")?;
-            (c.kind(v) != "declaration").then_some(v)
-        }
-        _ => None,
-    }
-}
-
 fn is_member_lvalue(c: &Cst, n: usize) -> bool {
     match c.kind(n) {
         "field_expression" | "subscript_expression" => true,
@@ -144,7 +113,7 @@ pub fn op_delete_stmt(m: &mut M) -> Option<Vec<Edit>> {
     let c = m.cst;
     let mut cands = Vec::new();
     for n in m.nodes.clone() {
-        if c.kind(n) != "expression_statement" || c.parent(n).map_or(true, |p| c.kind(p) != "compound_statement") {
+        if c.kind(n) != "expression_statement" || c.parent(n).is_none_or(|p| c.kind(p) != "compound_statement") {
             continue;
         }
         let Some(&e) = c.named(n).first() else { continue };
@@ -167,23 +136,6 @@ pub fn op_delete_stmt(m: &mut M) -> Option<Vec<Edit>> {
         Some(k) => Edit::replace(c, s, format!("{k};")),
         None => remove_stmt(c, s),
     }])
-}
-
-fn pure(c: &Cst, n: usize) -> bool {
-    !c.descendants(n).into_iter().any(|d| matches!(c.kind(d), "call_expression" | "assignment_expression" | "update_expression" | "new_expression" | "delete_expression"))
-}
-
-fn remove_stmt(c: &Cst, s: usize) -> Edit {
-    let mut start = c.nodes[s].start;
-    let mut end = c.nodes[s].end;
-    let line_start = c.src[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let rest = &c.src[end..];
-    let ws = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-    if c.src[line_start..start].trim().is_empty() && rest[ws..].starts_with('\n') {
-        start = line_start;
-        end += ws + 1;
-    }
-    Edit { start, end, text: String::new() }
 }
 
 
@@ -431,7 +383,7 @@ pub fn op_flag_and(m: &mut M) -> Option<Vec<Edit>> {
         if c.kind(b) != "compound_statement" {
             continue;
         }
-        let l = stmts(c, b);
+        let l = stmts_of(c, b);
         for i in 0..l.len().saturating_sub(2) {
             // `T v = false;` / `T v = 0;`
             let d = l[i];
@@ -450,7 +402,7 @@ pub fn op_flag_and(m: &mut M) -> Option<Vec<Edit>> {
                 continue;
             }
             let (Some(ca), Some(body)) = (c.child(outer, "condition"), c.child(outer, "consequence")) else { continue };
-            let inner_list = if c.kind(body) == "compound_statement" { stmts(c, body) } else { vec![body] };
+            let inner_list = if c.kind(body) == "compound_statement" { stmts_of(c, body) } else { vec![body] };
             let Some((&inner, defs)) = inner_list.split_last() else { continue };
             let set_true = |s: usize| {
                 let s = single(c, s);
@@ -511,18 +463,39 @@ pub fn op_flag_and(m: &mut M) -> Option<Vec<Edit>> {
 
 /// `s` with identifier `name` replaced by `with` (whole words only).
 fn replace_ident(s: &str, name: &str, with: &str) -> String {
-    let mut out = String::new();
+    if name.is_empty() {
+        return s.to_string();
+    }
     let b = s.as_bytes();
-    let mut i = 0;
     let is_id = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_';
-    while i < s.len() {
-        if s[i..].starts_with(name) && (i == 0 || !is_id(b[i - 1])) && b.get(i + name.len()).is_none_or(|&ch| !is_id(ch)) {
+    let mut out = String::with_capacity(s.len());
+    // copied up to `done`; searching from `at` (both on char boundaries: `name` is ASCII)
+    let (mut done, mut at) = (0, 0);
+    while let Some(k) = s[at..].find(name) {
+        let (st, e) = (at + k, at + k + name.len());
+        if (st == 0 || !is_id(b[st - 1])) && b.get(e).is_none_or(|&ch| !is_id(ch)) {
+            out.push_str(&s[done..st]);
             out.push_str(with);
-            i += name.len();
+            done = e;
+            at = e;
         } else {
-            out.push(b[i] as char);
-            i += 1;
+            at = st + s[st..].chars().next().map_or(1, char::len_utf8);
         }
     }
+    out.push_str(&s[done..]);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_ident;
+
+    #[test]
+    fn replace_ident_whole_words() {
+        assert_eq!(replace_ident("x = xy + x_1 + x;", "x", "(a)"), "(a) = xy + x_1 + (a);");
+        assert_eq!(replace_ident("ax xa x", "x", "y"), "ax xa y");
+        // non-ASCII text (a comment) is kept as it is
+        assert_eq!(replace_ident("x = 1; // größe x", "x", "y"), "y = 1; // größe y");
+        assert_eq!(replace_ident("é", "x", "y"), "é");
+    }
 }

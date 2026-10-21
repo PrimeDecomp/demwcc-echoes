@@ -219,7 +219,7 @@ pub fn effect_call(e: &Expr, lib: &crate::InlineLib) -> bool {
         Expr::Call { callee: mwdec_lift::Callee::Direct { sig, symbol }, .. } => {
             if sig.mangled.is_none() && symbol == &sig.qualified_name {
                 found |= lib.effectful.contains(&sig.qualified_name);
-            } else if !(symbol.starts_with("__") && mwdec_lift::sig::demangle(symbol).is_none()) {
+            } else if !is_intrinsic(symbol) {
                 found = true;
             }
         }
@@ -232,14 +232,16 @@ pub fn effect_call(e: &Expr, lib: &crate::InlineLib) -> bool {
     found
 }
 
+/// `__rlwimi`, `__cntlzw`...: compiler intrinsics (no effects, no linkage).
+pub fn is_intrinsic(sym: &str) -> bool {
+    sym.starts_with("__") && mwdec_lift::sig::demangle(sym).is_none()
+}
+
+/// Does `e` make a call other than an intrinsic (or a `new`)?
 pub fn real_call(e: &Expr) -> bool {
     let mut found = false;
     e.walk(&mut |x| match x {
-        Expr::Call { callee: mwdec_lift::Callee::Direct { symbol, .. }, .. } => {
-            if !(symbol.starts_with("__") && mwdec_lift::sig::demangle(symbol).is_none()) {
-                found = true;
-            }
-        }
+        Expr::Call { callee: mwdec_lift::Callee::Direct { symbol, .. }, .. } => found |= !is_intrinsic(symbol),
         Expr::Call { .. } | Expr::New { .. } => found = true,
         _ => {}
     });

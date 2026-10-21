@@ -169,11 +169,6 @@ pub fn reg_moves(target: &Function, ours: &Function) -> Vec<(RegClass, u8, u8)> 
     v
 }
 
-/// Callee-saved GPR moves only (the original tracer scope); kept for callers/tests.
-pub fn gpr_moves(target: &Function, ours: &Function) -> Vec<(u8, u8)> {
-    reg_moves(target, ours).into_iter().filter(|m| m.0 == RegClass::Gpr && m.1 >= 14 && m.2 >= 14).map(|m| (m.1, m.2)).collect()
-}
-
 fn label(n: &IgNode) -> String {
     match &n.name {
         Some(s) => format!("`{s}` (v{})", n.vreg),

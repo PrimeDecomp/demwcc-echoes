@@ -101,7 +101,7 @@ pub fn decode(code: &[u8], call_targets: &BTreeMap<u32, String>) -> Vec<Instr> {
             }
         }
         let mov = match (s.mnemonic, s.args.first().and_then(arg_reg), s.args.get(1).and_then(arg_reg)) {
-            ("mr", Some(d), Some(src)) | ("fmr", Some(d), Some(src)) if s.args.get(2).map_or(true, |a| matches!(a, Argument::None)) => {
+            ("mr", Some(d), Some(src)) | ("fmr", Some(d), Some(src)) if s.args.get(2).is_none_or(|a| matches!(a, Argument::None)) => {
                 Some((d, src))
             }
             _ => None,
@@ -365,7 +365,7 @@ pub fn webs_ext(ins: &[Instr], all: bool) -> Vec<Web> {
     }
     // ---- liveness per tracked callee-saved reg (only uses with real defs count)
     let real_use = |i: usize, r: RegId| -> bool {
-        ins[i].uses & bit(r) != 0 && rd_at[i].get(&r).map_or(false, |s| s.iter().any(|&d| d != entry))
+        ins[i].uses & bit(r) != 0 && rd_at[i].get(&r).is_some_and(|s| s.iter().any(|&d| d != entry))
     };
     let cs: Vec<RegId> = (0u8..64).filter(|&r| want(r)).collect();
     let mut live_in: Vec<u64> = vec![0; bs.len()];

@@ -9,6 +9,24 @@
 //!    modulo temps, so scheduling and register allocation don't matter) and replace them with
 //!    the call.
 
+/// Is the environment variable `$name` set (the `MWDI_*` debugging switches)? Read once per use
+/// site: several sit on the matcher's per-node paths.
+macro_rules! env_flag {
+    ($name:literal) => {{
+        static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SET.get_or_init(|| std::env::var_os($name).is_some())
+    }};
+}
+
+/// The value of the environment variable `$name` (the `MWDI_TRACE_*` filters), read once per use
+/// site.
+macro_rules! env_value {
+    ($name:literal) => {{
+        static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        VALUE.get_or_init(|| std::env::var($name).ok()).as_deref()
+    }};
+}
+
 pub mod addr;
 pub mod buffers;
 pub mod cflow;
@@ -148,17 +166,6 @@ pub fn build_library_for(db: &TypeDb, target: Option<&ObjectFile>, cache: Option
     lib
 }
 
-/// Library for the classes one function can touch (see [`relevance::relevant_for_function`]).
-pub fn build_library_for_function(db: &TypeDb, f: &mwdec_core::Function, cache: Option<&ProbeCache>, compile: &(dyn Fn(&str) -> Result<ObjectFile, String> + Sync)) -> InlineLib {
-    let rel = relevance::relevant_for_function(f, db);
-    let mut lib = build_library_rel(db, Some(&rel), cache, compile);
-    let classes = defctor::wanted(std::iter::once(f.name.as_str()), db);
-    lib.default_ctors = defctor::build(db, &classes, cache.map(|c| &c.defctors), compile);
-    let pairs = defctor::wanted_pairs(std::iter::once(f.name.as_str()), db);
-    lib.copy_ctors = defctor::build_copies(db, &pairs, cache.map(|c| &c.defctors), compile);
-    lib
-}
-
 fn probe_key(p: &probe::Probe) -> String {
     p.decl.inline_body.as_deref().unwrap_or("").replacen(&p.name, "__P", 1)
 }
@@ -189,7 +196,7 @@ fn template_of(p: &probe::Probe, obj: &ObjectFile, f: &mwdec_core::Function, db:
 }
 
 fn build_library_rel(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>, cache: Option<&ProbeCache>, compile: &(dyn Fn(&str) -> Result<ObjectFile, String> + Sync)) -> InlineLib {
-    let cache = if std::env::var("MWDI_NO_TCACHE").is_ok() { None } else { cache };
+    let cache = if env_flag!("MWDI_NO_TCACHE") { None } else { cache };
     let probes = probe::generate(db, rel);
     let total = probes.len();
     let t0 = std::time::Instant::now();
@@ -321,7 +328,7 @@ fn build_library_rel(db: &TypeDb, rel: Option<&std::collections::HashSet<String>
             eprintln!("rejected {n}: {}", e.chars().take(200).collect::<String>());
         }
     }
-    if std::env::var("MWDI_DEBUG").is_ok() {
+    if env_flag!("MWDI_DEBUG") {
         eprintln!("probe library: {} probes, {} to compile, {} compiles {:.1}s, total {:.1}s", total, attempted.len(), ncomp.load(std::sync::atomic::Ordering::Relaxed), t_compile, t0.elapsed().as_secs_f64());
         eprintln!("  db copy at {t_db:.1}s, relift from {t_lift0:.1}s, lifting {t_l:.1}s");
     }
@@ -347,7 +354,7 @@ pub fn library_for(s: &session::UnitSession) -> InlineLib {
 pub fn apply(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
     let t0 = std::time::Instant::now();
     let n = matcher::apply(ir, lib, db);
-    if std::env::var("MWDI_DEBUG").is_ok() {
+    if env_flag!("MWDI_DEBUG") {
         eprintln!("inline apply {}: {n} rewrites, {} templates, {} steps, {:.2}s [{}]", ir.symbol, lib.templates.len(), matcher::steps(), t0.elapsed().as_secs_f64(), util::prof::report());
     }
     n

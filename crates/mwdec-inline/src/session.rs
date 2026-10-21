@@ -32,7 +32,7 @@ pub fn add_vtables(p: &Project, unit: &str, obj: &ObjectFile, db: &mut TypeDb) {
         objs.extend(p.load_module_data(module));
     }
     for o in objs.iter() {
-        let relevant = o.data.keys().any(|n| mwdec_ctx::vtable::vtable_class(n).map_or(false, |c| db.classes.contains_key(&c)));
+        let relevant = o.data.keys().any(|n| mwdec_ctx::vtable::vtable_class(n).is_some_and(|c| db.classes.contains_key(&c)));
         if relevant {
             let vt = mwdec_ctx::vtables_from_object(o, db);
             let vt: BTreeMap<_, _> = vt.into_iter().filter(|(c, _)| db.classes.contains_key(c)).collect();
@@ -59,7 +59,7 @@ impl UnitSession {
         let plain = m.plain_context(&context, &u.cflags);
         let ctx = m.precompile(&context, &u.cflags).unwrap_or_else(|_| plain.clone());
         let mut s = UnitSession { unit: u.name.clone(), cflags: u.cflags.clone(), context, obj, db, mwcc: Arc::new(m), ctx, plain };
-        if std::env::var("MWDI_NO_COMPLETE").is_err() {
+        if !env_flag!("MWDI_NO_COMPLETE") {
             if let Some(mut db) = s.db.take() {
                 crate::complete::complete_instances(&mut db, &s.context, &s.cflags, &|code| s.compile(code));
                 s.db = Some(db);
@@ -72,7 +72,7 @@ impl UnitSession {
     pub fn compile(&self, code: &str) -> Result<ObjectFile, String> {
         let mut r = self.mwcc.compile_in(&self.ctx, code);
         if let Err(mwdec_mwcc::MwccError::Compile { status, messages }) = &r {
-            if status.map_or(false, |s| s < 0) || messages.contains("Unhandled exception") {
+            if status.is_some_and(|s| s < 0) || messages.contains("Unhandled exception") {
                 r = self.mwcc.compile_in(&self.plain, code);
             }
         }

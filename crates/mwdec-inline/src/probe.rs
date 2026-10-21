@@ -99,7 +99,7 @@ pub fn norm_op_name(n: &str) -> String {
     if let Some(i) = n.find("operator") {
         let (a, b) = n.split_at(i + "operator".len());
         let b = b.trim();
-        if b.chars().next().map_or(false, |c| c.is_alphabetic()) {
+        if b.chars().next().is_some_and(|c| c.is_alphabetic()) {
             // conversion / new / delete: keep one space
             return format!("{a} {}", b.split_whitespace().collect::<Vec<_>>().join(" "));
         }
@@ -141,7 +141,7 @@ fn work_list(db: &TypeDb) -> Vec<(String, Option<String>, String, DeclInfo, bool
                 work.push((qname.clone(), class.clone(), last.to_string(), d.clone(), false));
                 continue;
             }
-            if class.as_deref().map_or(false, |c| db.templates.contains_key(c)) || scope.map_or(false, |s| db.templates.contains_key(s)) {
+            if class.as_deref().is_some_and(|c| db.templates.contains_key(c)) || scope.is_some_and(|s| db.templates.contains_key(s)) {
                 continue;
             }
             // function templates: instantiate with the common scalar types (every template
@@ -253,7 +253,7 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
     for (qname, class, last, d, fn_template) in work_list(db) {
         let last = last.as_str();
         let d = &d;
-        if std::env::var("MWDI_TRACE_PROBE").is_ok_and(|f| qname.contains(f.as_str())) {
+        if env_value!("MWDI_TRACE_PROBE").is_some_and(|f| qname.contains(f)) {
             eprintln!("PROBE {qname} class {class:?} params {:?} inline {} body {:?}", d.params.iter().map(|p| &p.ty).collect::<Vec<_>>(), d.is_inline_defined, d.inline_body);
         }
         {
@@ -263,7 +263,7 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
             // trivial accessors only with a by-value class parameter or return (their copy
             // leaves a dead frame store that tells the call apart from a plain member access)
             let by_value_class = |t: &Type| !matches!(strip_cv(t), Type::Ptr(_) | Type::Ref(_)) && is_class_type(t, db);
-            let needs_dead = d.inline_body.as_deref().map_or(false, crate::relevance::trivial_body);
+            let needs_dead = d.inline_body.as_deref().is_some_and(crate::relevance::trivial_body);
             if needs_dead && !(d.params.iter().any(|p| by_value_class(&p.ty)) || by_value_class(&d.ret)) {
                 continue;
             }
@@ -283,15 +283,15 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
             } else {
                 class.is_some() && !off("MWDI_NO_LOOP_METHODS")
             };
-            if std::env::var_os("MWDI_TRACE_LOOPS").is_some() && d.inline_body.as_deref().is_some_and(|b| b.split_whitespace().any(|t| matches!(t, "for" | "while" | "do"))) {
+            if env_flag!("MWDI_TRACE_LOOPS") && d.inline_body.as_deref().is_some_and(|b| b.split_whitespace().any(|t| matches!(t, "for" | "while" | "do"))) {
                 eprintln!("LOOPINL {qname} ret {:?} params {:?} body {:?}", d.ret, d.params.iter().map(|p| &p.ty).collect::<Vec<_>>(), d.inline_body);
             }
-            if d.inline_body.as_deref().map_or(false, |b| b.split_whitespace().any(|t| matches!(t, "for" | "while" | "do" | "goto") && !(loop_ok && t != "goto"))) {
+            if d.inline_body.as_deref().is_some_and(|b| b.split_whitespace().any(|t| matches!(t, "for" | "while" | "do" | "goto") && !(loop_ok && t != "goto"))) {
                 continue;
             }
             // constructors of class template instances with stream or count parameters
             // (containers reading streams, sized vectors: loops and allocations)
-            if class.as_deref().map_or(false, |c| c.contains('<'))
+            if class.as_deref().is_some_and(|c| c.contains('<'))
                 && class.as_deref().map(|c| mwdec_lift::sig::split_scope(c).1.split('<').next().unwrap_or("").to_string()).as_deref() == Some(last)
                 && d.params.iter().any(|p| matches!(strip_cv(&p.ty), Type::Int { .. } | Type::Long { .. }) || format!("{:?}", p.ty).contains("CInputStream"))
             {
@@ -303,7 +303,7 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
                 }
             }
             // (protected methods through a derived helper, see `protected_wrap`)
-            let protected = d.access == mwdec_core::Access::Protected && class.is_some() && !d.is_static && std::env::var_os("MWDI_NO_PROTECTED").is_none();
+            let protected = d.access == mwdec_core::Access::Protected && class.is_some() && !d.is_static && !env_flag!("MWDI_NO_PROTECTED");
             if d.access != mwdec_core::Access::Public && !protected {
                 continue;
             }
@@ -311,11 +311,11 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
                 continue;
             }
             if let Some(c) = &class {
-                if mwdec_lift::sig::find_class(db, c).map_or(true, |k| k.is_declaration) {
+                if mwdec_lift::sig::find_class(db, c).is_none_or(|k| k.is_declaration) {
                     continue;
                 }
             }
-            let is_ctor = class.as_deref().map_or(false, |c| {
+            let is_ctor = class.as_deref().is_some_and(|c| {
                 let own = mwdec_lift::sig::split_scope(c).1;
                 own == last || own.split('<').next() == Some(last)
             });
@@ -323,7 +323,7 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
                 continue;
             }
             let tp: &[String] = &[];
-            let skips = std::env::var("MWDI_SKIPS").is_ok();
+            let skips = env_flag!("MWDI_SKIPS");
             let Some(pspell) = d.params.iter().map(|p| spell(&p.ty, db, tp)).collect::<Option<Vec<_>>>() else {
                 if skips {
                     eprintln!("SKIP {qname}: params {:?}", d.params.iter().map(|p| &p.ty).collect::<Vec<_>>());
@@ -344,7 +344,7 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
                 let c = class.clone().unwrap();
                 // default constructors only for class template instances (`optional_object<T>()`:
                 // an empty optional); elsewhere zero stores are too common to name
-                if (d.params.is_empty() && !c.contains('<')) || mwdec_lift::sig::find_class(db, &c).map_or(true, |k| k.vptr_offset.is_some()) {
+                if (d.params.is_empty() && !c.contains('<')) || mwdec_lift::sig::find_class(db, &c).is_none_or(|k| k.vptr_offset.is_some()) {
                     continue;
                 }
                 kind = CallKind::Ctor;
@@ -418,7 +418,7 @@ pub fn generate(db: &TypeDb, rel: Option<&std::collections::HashSet<String>>) ->
             // constant-argument specialisations (see `specialisations`)
             // (constructors only on request: their folds into differently typed stack objects
             // render casts that don't compile)
-            if std::env::var("MWDI_NO_CONSTSPEC").is_err() && (!matches!(kind, CallKind::Ctor) || std::env::var("MWDI_CONSTSPEC_CTOR").is_ok()) {
+            if !env_flag!("MWDI_NO_CONSTSPEC") && (!matches!(kind, CallKind::Ctor) || env_flag!("MWDI_CONSTSPEC_CTOR")) {
                 let off = if matches!(kind, CallKind::Method) { 1 } else { 0 };
                 for spec in specialisations(d, db) {
                     let mut args = call_args.clone();
@@ -559,11 +559,11 @@ pub fn specialisations(d: &DeclInfo, db: &TypeDb) -> Vec<Vec<(usize, String, mwd
         out.dedup();
         out
     };
-    let all = std::env::var("MWDI_CONSTSPEC_ALL").is_ok();
+    let all = env_flag!("MWDI_CONSTSPEC_ALL");
     let mut per: Vec<Vec<(usize, String, Expr)>> = vec![];
     for (i, p) in d.params.iter().enumerate() {
         let Some(n) = p.name.as_deref() else { continue };
-        if !words.iter().any(|t| *t == n) {
+        if !words.contains(&n) {
             continue;
         }
         let pt = strip_cv(&p.ty);

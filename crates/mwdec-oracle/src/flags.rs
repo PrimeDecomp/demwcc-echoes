@@ -105,11 +105,16 @@ pub fn profile_flags(p: Profile, root: &Path) -> Vec<String> {
     if flags.is_empty() {
         eprintln!("warning: no flags for profile {p:?}: {} has no unit of it (or no objdiff.json / build.ninja)", root.display());
     }
+    absolute_includes(&flags, root)
+}
+
+/// `flags` with the paths after `-i` / `-I` / `-ir` made absolute against `root`.
+pub fn absolute_includes(flags: &[String], root: &Path) -> Vec<String> {
     let mut out = Vec::with_capacity(flags.len());
     let mut abs_next = false;
     for a in flags {
-        if abs_next && !Path::new(&a).is_absolute() {
-            out.push(root.join(&a).to_string_lossy().replace('\\', "/"));
+        if abs_next && !Path::new(a).is_absolute() {
+            out.push(root.join(a).to_string_lossy().replace('\\', "/"));
         } else {
             out.push(a.clone());
         }

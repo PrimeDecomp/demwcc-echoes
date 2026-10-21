@@ -1,18 +1,11 @@
-//! Private minimal compiler driver (until `mwdec-mwcc` provides one): run mwcceppc.exe
-//! (through sjiswrap like the project's `mwcc_sjis` rule) with cwd = project root.
-use anyhow::{Context, Result};
+//! Compiling through the shared `mwdec-mwcc` driver, and reading its error output.
+use anyhow::Result;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 
 /// Project root: `$MWDEC_PROJECT_ROOT` or the frozen default.
 pub fn project_root() -> PathBuf {
     std::env::var_os("MWDEC_PROJECT_ROOT").map(PathBuf::from).unwrap_or_else(mwdec_core::paths::project_root)
-}
-
-pub struct MwccOutput {
-    pub success: bool,
-    pub output: String,
 }
 
 /// Remove flags that conflict with our own invocation (-c, -o X, -MMD, -E, -maxerrors N).
@@ -59,25 +52,6 @@ pub fn compile_text(root: &Path, source: &str, flags: &[String], dir: &Path) -> 
     }
 }
 
-/// Run the compiler directly (through sjiswrap when present); `args` are complete
-/// (flags + inputs + outputs). Kept for ad-hoc experiments; the pipeline uses `compile_text`.
-pub fn run(root: &Path, args: &[String]) -> Result<MwccOutput> {
-    let mwcc = root.join("build/compilers/GC/2.7/mwcceppc.exe");
-    let sjis = root.join("build/tools/sjiswrap.exe");
-    let mut cmd = if sjis.exists() {
-        let mut c = Command::new(&sjis);
-        c.arg(&mwcc);
-        c
-    } else {
-        Command::new(&mwcc)
-    };
-    cmd.args(args).current_dir(root);
-    let out = cmd.output().with_context(|| format!("running {}", mwcc.display()))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok(MwccOutput { success: out.status.success(), output: text })
-}
-
 /// Lines (1-based) of `file_text` that the compiler reported errors on. MWCC echoes the
 /// offending source line (`#      12: <text>`) before `#   Error:`; we only accept a line number
 /// whose echoed text matches our file, so errors inside headers are not misattributed.
@@ -101,8 +75,4 @@ pub fn error_lines(output: &str, file_text: &str) -> Vec<usize> {
     res.sort();
     res.dedup();
     res
-}
-
-pub fn path_arg(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
 }

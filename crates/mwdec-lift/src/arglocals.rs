@@ -16,13 +16,6 @@ fn trivial(e: &Expr) -> bool {
     }
 }
 
-fn strip(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip(e),
-        e => e,
-    }
-}
-
 pub fn args_to_locals(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut Vec<bool>, db: Option<&TypeDb>) {
     // the first top-level call statement with at least three computed arguments
     let pos = body.iter().position(|s| {
@@ -59,13 +52,13 @@ pub fn args_to_locals(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, is_temp: &mut V
         });
         let (ty, val) = if needs_conv {
             let t = pt.clone().unwrap();
-            (t.clone(), Expr::Cast { ty: t, e: Box::new(strip(a).clone()) })
+            (t.clone(), Expr::Cast { ty: t, e: Box::new(strip_casts(a).clone()) })
         } else {
-            let vt = types::ty_of(strip(a), vars);
+            let vt = types::ty_of(strip_casts(a), vars);
             if matches!(vt, Type::Unknown { .. } | Type::Void) {
                 continue;
             }
-            (vt, strip(a).clone())
+            (vt, strip_casts(a).clone())
         };
         let v = vars.len();
         vars.push(Var { name: format!("arg{n}"), ty, kind: VarKind::Local });

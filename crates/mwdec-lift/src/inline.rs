@@ -13,6 +13,16 @@ pub fn count_uses(stmts: &[Stmt], uses: &mut HashMap<VarId, usize>) {
     }
 }
 
+/// Count the plain assignments (`v = ...`) of every variable in a statement list, nested
+/// statements included.
+pub fn count_defs(stmts: &[Stmt], defs: &mut HashMap<VarId, usize>) {
+    Stmt::each(stmts, &mut |s| {
+        if let Stmt::Assign { dst: Expr::Var(v), .. } = s {
+            *defs.entry(*v).or_default() += 1;
+        }
+    });
+}
+
 fn count_expr(e: &Expr, uses: &mut HashMap<VarId, usize>) {
     e.walk(&mut |x| {
         if let Expr::Var(v) = x {
@@ -311,11 +321,10 @@ fn sibling_calls(e: &Expr, t: VarId) -> usize {
     let mut n = 0;
     e.walk(&mut |x| {
         // (a construction running a member's out-of-line constructor counts as a call)
-        if matches!(x, Expr::Call { .. }) || crate::construct::runs_code(x) {
-            if !x.uses_var(t) && !x.is_pure_call() {
+        if (matches!(x, Expr::Call { .. }) || crate::construct::runs_code(x))
+            && !x.uses_var(t) && !x.is_pure_call() {
                 n += 1;
             }
-        }
     });
     n
 }

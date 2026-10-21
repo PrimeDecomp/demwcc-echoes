@@ -6,22 +6,10 @@
 //! exact colouring order of the real compiler.
 //!
 //! usage: ra-simplify [N=100] [seed=1] [--gpr] [-v]
+use mwdec_oracle::testgen::Rng;
 use mwdec_oracle::compile::Compiler;
 use mwdec_oracle::regalloc::{simplify_order, FPR_K, GPR_K};
 use mwdec_oracle::tracer::{trace_source, ColorRound, TraceOptions};
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-}
 
 fn gen(r: &mut Rng, gpr: bool) -> String {
     let t = if gpr { "int" } else { "float" };
@@ -94,7 +82,7 @@ fn main() -> anyhow::Result<()> {
     let gpr = args.iter().any(|a| a == "--gpr");
     let verbose = args.iter().any(|a| a == "-v");
     let comp = Compiler::default();
-    let mut r = Rng(0x9E3779B97F4A7C15 ^ seed.wrapping_mul(0x2545F4914F6CDD1D));
+    let mut r = Rng::seeded(seed);
     let (mut rounds, mut blocked_rounds, mut ok_uniform, mut ok_cost, mut skipped) = (0, 0, 0, 0, 0);
     let (mut ok_uniform_all, mut ok_cost_all) = (0, 0);
     for case in 0..n {

@@ -2,7 +2,6 @@
 
 use crate::insn::Insn;
 use mwdec_core::{Function, ObjectFile, RelocKind};
-use ppc750cl::Opcode;
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -477,9 +476,4 @@ fn intersect(idom: &[usize], order: &[usize], mut a: usize, mut b: usize) -> usi
         }
     }
     a
-}
-
-/// True for opcodes that end a block.
-pub fn is_terminator(op: Opcode) -> bool {
-    matches!(op, Opcode::B | Opcode::Bc | Opcode::Bcctr | Opcode::Bclr)
 }

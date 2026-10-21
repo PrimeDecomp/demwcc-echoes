@@ -10,7 +10,8 @@ are in [DESIGN.md](DESIGN.md).
 re-exported), project records (`Unit`,
 `DatasetEntry`), the type model (`Type`, `FuncSig`, `Class`, `Field`, `DeclInfo`, `TypeDb`) and
 `CompareResult`. Two small behaviour modules: `paths` (`project_root`, `work_base`, `work_dir`)
-and `memcap` (`install`, `stats`, `report_line`). Changes are additive only (add fields or
+and `memcap` (`install`, `stats`, `report_line`), plus `split_of` (a unit's train/test split;
+mwdec-project re-exports it). Changes are additive only (add fields or
 variants, never rename or remove), since every crate depends on it.
 
 **`mwdec-obj`**: loads MWCC/dtk ELF objects into `ObjectFile` (`load_object`,
@@ -80,7 +81,8 @@ files with checked expectations), `webs`, `regalloc` (simplify and select are mw
 model), `schedcheck`, `explain`, `iro`, `tracer` (the compiler's decisions: mwcc-trace's `records`
 reads what the module's trace hooks record, in process, into its `Trace`; GC 2.6 / 2.7 only). Binaries: `mwcc-oracle` (asm / trace / inline / iro front
 end) and the validators `ra-scan`, `ra-fuzz`, `ra-simplify`,
-`ra-spill-scan`, `explain-check`, `sched-alias-check`.
+`ra-spill-scan`, `explain-check`, `sched-alias-check` (the random-program checkers share
+`testgen::Rng`).
 
 **`mwdec-search`**: the compiler-in-the-loop permuter. `search(&Scorer, init, &SearchConfig) ->
 SearchResult` runs a parallel beam / hill-climb over text mutations; `polish` does

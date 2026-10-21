@@ -3,23 +3,11 @@
 //! located in the recorded schedules.
 //!
 //! usage: explain-check [N=50] [seed=1] [-v]
+use mwdec_oracle::testgen::Rng;
 use mwdec_oracle::asm;
 use mwdec_oracle::compile::Compiler;
 use mwdec_oracle::explain::{explain_sched_diff, Verdict};
 use std::collections::BTreeMap;
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-}
 
 fn stmt(r: &mut Rng) -> String {
     let f = ["a", "b", "c"][r.below(3) as usize];
@@ -54,7 +42,7 @@ fn main() -> anyhow::Result<()> {
     let seed: u64 = pos.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
     let verbose = args.iter().any(|a| a == "-v");
     let comp = Compiler::default();
-    let mut r = Rng(0x9E3779B97F4A7C15 ^ seed.wrapping_mul(0x2545F4914F6CDD1D));
+    let mut r = Rng::seeded(seed);
     let mut tally: BTreeMap<String, usize> = BTreeMap::new();
     let (mut cases, mut same) = (0, 0);
     let pre = "struct S { int a; int b; int c; };\nvoid use(S*);\nint g1;\n";

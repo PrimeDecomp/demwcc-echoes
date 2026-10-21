@@ -73,7 +73,7 @@ pub fn to_asm(f: &Function) -> asm::Func {
         relocs: f
             .relocs
             .iter()
-            .map(|r| asm::Rel { offset: r.offset, r_type: r_type(r.kind), target: r.target.clone(), addend: r.addend as i64 })
+            .map(|r| asm::Rel { offset: r.offset, r_type: r_type(r.kind), target: r.target.clone(), addend: r.addend })
             .collect(),
         address: f.address,
     }
@@ -292,12 +292,11 @@ pub fn move_before(src: &str, symbol: &str, x: u32, y: u32) -> Vec<String> {
 
 /// Swap the statements at lines `x` and `y` (at the level of their common block).
 pub fn swap_lines(src: &str, symbol: &str, x: u32, y: u32) -> Option<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let cst = Cst::parse(src);
     let def = crate::func::find_target(&cst, symbol)?;
     let body = cst.child(def, "body")?;
     let (a, b) = siblings(&cst, body, x, y)?;
-    let s = apply(src, &[Edit::replace(&cst, a, cst.text(b)), Edit::replace(&cst, b, cst.text(a))])?;
-    (Cst::parse(&s).errors <= cst.errors).then_some(s)
+    crate::cst::apply_checked(src, &cst, &[Edit::replace(&cst, a, cst.text(b)), Edit::replace(&cst, b, cst.text(a))])
 }
 

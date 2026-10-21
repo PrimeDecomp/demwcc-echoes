@@ -11,27 +11,13 @@ use crate::types;
 use mwdec_core::{FuncSig, Param, Type, TypeDb};
 use std::collections::HashMap;
 
-fn strip_tmpl(s: &str) -> String {
-    let mut out = String::new();
-    let mut d = 0;
-    for c in s.chars() {
-        match c {
-            '<' => d += 1,
-            '>' => d -= 1,
-            _ if d == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// A constructor usable for member-wise construction: (signature, member name per parameter).
 fn ctors(db: &TypeDb, cls: &str) -> Vec<(FuncSig, Vec<String>)> {
     let last = sig::split_scope(cls).1;
-    let key = format!("{}::{}", strip_tmpl(cls), strip_tmpl(last));
+    let key = format!("{}::{}", crate::sig::strip_tmpl(cls), crate::sig::strip_tmpl(last));
     let mut out = vec![];
     for d in db.decls.get(&key).map(|v| v.as_slice()).unwrap_or(&[]) {
-        if !d.is_inline_defined || d.params.is_empty() || !d.inline_body.as_deref().map_or(false, |b| b.trim().is_empty()) {
+        if !d.is_inline_defined || d.params.is_empty() || !d.inline_body.as_deref().is_some_and(|b| b.trim().is_empty()) {
             continue;
         }
         // callable from anywhere, and not in terms of template parameters
@@ -91,7 +77,7 @@ pub fn member_ctors(db: &TypeDb, cls: &str) -> Vec<(FuncSig, Vec<i32>)> {
 fn member_ctors_d(db: &TypeDb, cls: &str, depth: u32) -> Vec<(FuncSig, Vec<i32>)> {
     let Some(c) = sig::find_class(db, cls) else { return vec![] };
     let last = sig::split_scope(cls).1;
-    let key = format!("{}::{}", strip_tmpl(cls), strip_tmpl(last));
+    let key = format!("{}::{}", crate::sig::strip_tmpl(cls), crate::sig::strip_tmpl(last));
     let mut out = vec![];
     for d in db.decls.get(&key).map(|v| v.as_slice()).unwrap_or(&[]) {
         if !d.is_inline_defined || d.params.is_empty() || d.access != mwdec_core::Access::Public || !d.template_params.is_empty() {
@@ -117,7 +103,7 @@ fn member_ctors_d(db: &TypeDb, cls: &str, depth: u32) -> Vec<(FuncSig, Vec<i32>)
                 continue;
             }
             // a base class or a member object built from parameters
-            let sub = match c.bases.iter().find(|b| sig::split_scope(&strip_tmpl(&b.name)).1 == toks[0]) {
+            let sub = match c.bases.iter().find(|b| sig::split_scope(&crate::sig::strip_tmpl(&b.name)).1 == toks[0]) {
                 Some(b) => Some((b.name.clone(), b.offset as i32)),
                 None => c.fields.iter().find(|f| f.name == toks[0] && f.bitfield.is_none()).and_then(|f| {
                     let ft = types::resolve(Some(db), strip_cv(&f.ty)).into_owned();
@@ -183,7 +169,7 @@ fn build_at(db: &TypeDb, cls: &str, base: i32, stores: &[(i32, Expr)], depth: u3
                 named(&pr).and_then(|pc| build_at(db, pc, base + o, stores, depth + 1, used, vars))
             } else {
                 // (a whole object stored as its first member's word is no member value)
-                stores.iter().find(|(so, x)| *so == base + o && !types::is_aggregate(Some(db), &types::resolve(Some(db), &types::ty_of(x, vars)).into_owned())).map(|(so, x)| {
+                stores.iter().find(|(so, x)| *so == base + o && !types::is_aggregate(Some(db), &types::resolve(Some(db), &types::ty_of(x, vars)))).map(|(so, x)| {
                     used.push(*so);
                     x.clone()
                 })
@@ -236,16 +222,6 @@ fn member_slots(db: &TypeDb, cls: &str) -> HashMap<String, (i32, u32, Type)> {
         }
     }
     m
-}
-
-fn count_var(b: &[Stmt], v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(b, &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1
-        }
-    });
-    n
 }
 
 /// (stack object, class, the arg expression to replace) for constructible arguments of a call.
@@ -491,7 +467,7 @@ fn member_ctor_call(s: &Stmt, v: VarId) -> Option<(i32, FuncSig, Vec<Expr>)> {
 /// Does literal token text `lit` (`1.f`, `0`, `- 1`) have the value of `e`?
 fn literal_is(lit: &str, e: &Expr) -> bool {
     let t: String = lit.split_whitespace().collect();
-    let t = t.trim_end_matches(|c| c == 'f' || c == 'F');
+    let t = t.trim_end_matches(['f', 'F']);
     match e {
         Expr::Int { value, .. } => t.parse::<i64>().ok() == Some(*value),
         Expr::Float { bits, double } => t.parse::<f64>().ok().is_some_and(|x| if *double { x.to_bits() == *bits } else { (x as f32).to_bits() as u64 == *bits }),
@@ -507,7 +483,7 @@ fn literal_is(lit: &str, e: &Expr) -> bool {
 fn build_with_member_calls(db: &TypeDb, cls: &str, stores: &[(i32, Expr)], calls: &[(i32, FuncSig, Vec<Expr>)]) -> Option<Expr> {
     let c = sig::find_class(db, cls)?;
     let last = sig::split_scope(cls).1;
-    let key = format!("{}::{}", strip_tmpl(cls), strip_tmpl(last));
+    let key = format!("{}::{}", crate::sig::strip_tmpl(cls), crate::sig::strip_tmpl(last));
     for d in db.decls.get(&key).map(|v| v.as_slice()).unwrap_or(&[]) {
         if !d.is_inline_defined || d.params.is_empty() || d.access != mwdec_core::Access::Public || !d.template_params.is_empty() {
             continue;
@@ -625,10 +601,10 @@ fn fold_returned_block(b: &mut Vec<Stmt>, vars: &[Var], is_temp: &mut [bool], te
         };
         // the call using it, after pure statements only
         let mut j = i + 1;
-        while j < b.len() && !stmt_uses(&b[j], v) && pure_stmt(&b[j]) {
+        while j < b.len() && !Stmt::uses_var(&b[j], v) && pure_stmt(&b[j]) {
             j += 1;
         }
-        if j >= b.len() || !stmt_uses(&b[j], v) {
+        if j >= b.len() || !Stmt::uses_var(&b[j], v) {
             i += 1;
             continue;
         }
@@ -674,7 +650,7 @@ fn fold_returned_block(b: &mut Vec<Stmt>, vars: &[Var], is_temp: &mut [bool], te
             k -= 1;
             match &b[k] {
                 Stmt::Assign { dst: Expr::Var(t), src } if !src.has_call() => {
-                    if stmt_uses(&stmt, *t) {
+                    if Stmt::uses_var(&stmt, *t) {
                         if let Some(x) = is_temp.get_mut(*t) {
                             *x = false;
                         }
@@ -696,16 +672,6 @@ fn strip_cv_ty(t: &Type) -> &Type {
         Type::Const(x) | Type::Volatile(x) => strip_cv_ty(x),
         t => t,
     }
-}
-
-fn stmt_uses(s: &Stmt, v: VarId) -> bool {
-    let mut f = false;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            f = true;
-        }
-    });
-    f
 }
 
 fn pure_stmt(s: &Stmt) -> bool {

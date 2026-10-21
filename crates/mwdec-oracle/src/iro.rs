@@ -228,7 +228,7 @@ impl IroBlock {
             let k = |i: usize| -> String {
                 kids[p].get(i).map(|&q| render(nodes, kids, q, depth + 1)).unwrap_or_else(|| "?".into())
             };
-            let is_addr = |i: usize| kids[p].get(i).map_or(false, |&q| nodes[q].op == "Operand");
+            let is_addr = |i: usize| kids[p].get(i).is_some_and(|&q| nodes[q].op == "Operand");
             match n.op.as_str() {
                 "Operand" => {
                     let t = n.text.clone().unwrap_or_default();
@@ -305,10 +305,5 @@ impl IroStage {
         }
         out
     }
-}
-
-/// The final IRO form of the first function whose name contains `func`.
-pub fn final_stage<'a>(stages: &'a [IroStage], func: &str) -> Option<&'a IroStage> {
-    stages.iter().filter(|s| s.function.contains(func) && s.stage == FINAL_STAGE).last()
 }
 

@@ -13,19 +13,6 @@ use mwdec_oracle::regalloc::{simplify_order, solve_order_constrained, Class, Nod
 use mwdec_oracle::webs::{self, reg_name, Origin};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn split_of(unit: &str) -> &'static str {
-    let mut h: u32 = 0x811c9dc5;
-    for b in unit.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    if h % 10 < 7 {
-        "train"
-    } else {
-        "test"
-    }
-}
-
 fn train_units() -> anyhow::Result<Vec<(String, String)>> {
     let text = std::fs::read_to_string(mwdec_core::paths::project_root().join("objdiff.json"))?;
     let mut units = vec![];
@@ -41,7 +28,7 @@ fn train_units() -> anyhow::Result<Vec<(String, String)>> {
         let r2 = &rest[tp + 16..];
         let target = &r2[..r2.find('"').unwrap()];
         let block = &rest[..next_name.min(rest.len())];
-        if block.contains("-lang=c++") && block.contains("deferred,noauto") && split_of(name) == "train" {
+        if block.contains("-lang=c++") && block.contains("deferred,noauto") && mwdec_core::split_of(name) == "train" {
             units.push((name.to_string(), target.to_string()));
         }
     }

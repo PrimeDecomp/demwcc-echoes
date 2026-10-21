@@ -212,16 +212,14 @@ impl Obj {
     pub fn bytes_at(&self, sym: &str, addend: i64, len: usize) -> Option<&[u8]> {
         let (sec, addr) = self.sym_loc.get(sym)?;
         let b = self.sections.get(sec)?;
-        let s = (*addr as i64 + addend) as usize;
-        if s + len > b.len() {
-            return None;
-        }
-        Some(&b[s..s + len])
+        // (a negative addend can point before the section)
+        let s = usize::try_from(*addr as i64 + addend).ok()?;
+        b.get(s..s.checked_add(len)?)
     }
     pub fn cstr_at(&self, sym: &str, addend: i64) -> Option<String> {
         let (sec, addr) = self.sym_loc.get(sym)?;
         let b = self.sections.get(sec)?;
-        let s = (*addr as i64 + addend) as usize;
+        let s = usize::try_from(*addr as i64 + addend).ok()?;
         let rest = b.get(s..)?;
         let e = rest.iter().position(|&c| c == 0)?;
         Some(String::from_utf8_lossy(&rest[..e]).into_owned())

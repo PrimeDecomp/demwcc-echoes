@@ -8,31 +8,6 @@ use crate::types;
 use mwdec_core::{Type, TypeDb};
 use std::collections::{HashMap, HashSet};
 
-/// Every statement of a body, nested ones included.
-fn each_stmt(body: &[Stmt], f: &mut dyn FnMut(&Stmt)) {
-    for s in body {
-        f(s);
-        match s {
-            Stmt::If { then, els, .. } => {
-                each_stmt(then, f);
-                each_stmt(els, f);
-            }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => each_stmt(body, f),
-            Stmt::For { init, step, body, .. } => {
-                each_stmt(init, f);
-                each_stmt(step, f);
-                each_stmt(body, f);
-            }
-            Stmt::Switch { cases, .. } => {
-                for c in cases {
-                    each_stmt(&c.body, f);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Does the function construct an object of another class into its first parameter, with an
 /// unknown return type? Then that "parameter" is the hidden struct-return pointer (the mangled
 /// name has no return type and the headers don't declare the function).
@@ -47,7 +22,7 @@ pub fn constructs_into_param0(ir: &IrFunction) -> bool {
     // a construction guarded by a null test of the first parameter is a placement construction
     // into it (`if (p) new (p) T(v)`): nobody tests the struct-return slot
     let mut tested = false;
-    each_stmt(&ir.body, &mut |s| {
+    Stmt::each(&ir.body, &mut |s| {
         if let Stmt::If { cond, .. } = s {
             let mut c = cond;
             while let Expr::Cast { e, .. } = c {
@@ -77,7 +52,7 @@ pub fn constructs_into_param0(ir: &IrFunction) -> bool {
     let p0_const = ir.sig.params.first().is_some_and(|p| matches!(strip_cv(&p.ty), Type::Ref(x) | Type::Ptr(x) if matches!(**x, Type::Const(_))));
     if p0_const {
         let mut stores = false;
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if let Stmt::Assign { dst, .. } = s {
                 let into = match dst {
                     Expr::Var(v) => *v == p0,
@@ -125,7 +100,7 @@ pub fn standin_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
     if matches!(body.last(), Some(Stmt::Return(None))) {
         body.pop();
     }
-    let first = body.iter().position(|s| stmt_mentions(s, sret)).unwrap_or(body.len());
+    let first = body.iter().position(|s| Stmt::uses_var(s, sret)).unwrap_or(body.len());
     let mut fields: Vec<(i32, Type, Expr)> = vec![];
     // the first word already folded into `return x;` after the other stores: member 0
     if first < body.len() {
@@ -151,7 +126,7 @@ pub fn standin_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
                 Type::Int { size: 4, .. } | Type::Float { size: 4 } | Type::Ptr(_) => strip_cv(&t).clone(),
                 _ => return false,
             };
-            if !stmt_mentions(body.last().unwrap(), sret) && !e.has_call() {
+            if !Stmt::uses_var(body.last().unwrap(), sret) && !e.has_call() {
                 let e = e.clone();
                 body.pop();
                 fields.push((0, t, e));
@@ -239,7 +214,7 @@ fn type_guessed_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
     });
     // or of an object stored there whole
     if cls.is_none() {
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if let Stmt::Assign { dst: Expr::Load { base, offset: 0, .. }, src: Expr::Construct { class, .. } } = s {
                 if cls.is_none() && matches!(&**base, Expr::Var(v) if *v == sret) {
                     cls = named(class).map(|n| n.to_string());
@@ -252,7 +227,7 @@ fn type_guessed_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
     if let (None, Some(db)) = (&cls, db) {
         let mut extent = 0i32;
         let mut any = false;
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if let Stmt::Assign { dst: Expr::Load { base, offset, ty } | Expr::Member { base, offset, ty }, .. } = s {
                 if matches!(&**base, Expr::Var(v) if *v == sret) {
                     any = true;
@@ -279,13 +254,13 @@ fn type_guessed_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
         let vars = ir.vars.clone();
         // single-definition temps (`t = g.value; ... *ret = t`)
         let mut defs: HashMap<VarId, (usize, Expr)> = HashMap::new();
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if let Stmt::Assign { dst: Expr::Var(t), src } = s {
                 let e = defs.entry(*t).or_insert((0, src.clone()));
                 e.0 += 1;
             }
         });
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if let Stmt::Assign { dst: Expr::Load { base, offset, ty }, src } = s {
                 if matches!(&**base, Expr::Var(v) if *v == sret) {
                     let w = scalar_size(ty).unwrap_or(0);
@@ -313,10 +288,10 @@ fn type_guessed_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
         if let Some(c) = found.iter().flatten().next().cloned() {
             let c = &c;
             // (any other store must be of the same width at the start: a plain value of it)
-            let all = found.iter().all(|f| f.as_ref().map_or(true, |x| x == c));
+            let all = found.iter().all(|f| f.as_ref().is_none_or(|x| x == c));
             let n_stores = found.len();
             let mut widths_ok = true;
-            each_stmt(&ir.body, &mut |s| {
+            Stmt::each(&ir.body, &mut |s| {
                 if let Stmt::Assign { dst: Expr::Load { base, offset, .. }, .. } = s {
                     if matches!(&**base, Expr::Var(v) if *v == sret) && *offset != 0 {
                         widths_ok = false;
@@ -338,7 +313,7 @@ fn type_guessed_sret(ir: &mut IrFunction, db: Option<&TypeDb>) -> bool {
     if let (None, Some(db)) = (&cls, db) {
         let mut stores: Vec<(i32, Expr)> = vec![];
         let mut widths: Vec<(i32, Option<u32>)> = vec![];
-        each_stmt(&ir.body, &mut |s| {
+        Stmt::each(&ir.body, &mut |s| {
             if let Stmt::Assign { dst: Expr::Load { base, offset, ty }, src } = s {
                 if matches!(&**base, Expr::Var(v) if *v == sret) {
                     stores.push((*offset, src.clone()));
@@ -401,7 +376,7 @@ pub fn apply(ir: &mut IrFunction, db: Option<&TypeDb>) {
                         },
                         _ => None,
                     };
-                    !base.map_or(false, |v| stack[v])
+                    !base.is_some_and(|v| stack[v])
                 }
                 _ => true,
             })
@@ -507,7 +482,7 @@ pub fn narrow_float_stores(ir: &mut IrFunction, db: Option<&TypeDb>) {
         }
     });
     for init in &mut ir.init_list {
-        if init.ctor.is_none() && init.member_ty.as_ref().is_some_and(|t| narrow(t)) {
+        if init.ctor.is_none() && init.member_ty.as_ref().is_some_and(&narrow) {
             if let [a] = init.args.as_mut_slice() {
                 unwrap(a);
             }
@@ -570,8 +545,8 @@ fn construct_from_stores(stores: &[(i32, Expr)], ret: &Type, db: Option<&TypeDb>
     if stores.iter().all(|(_, e)| e.as_int() == Some(0)) {
         let last = sig::split_scope(&cls).1;
         let last = last.split('<').next().unwrap_or(last);
-        let key = format!("{}::{}", strip_tmpl(&cls), last);
-        if db.decls.get(&key).map_or(false, |ds| ds.iter().any(|d| d.params.is_empty())) {
+        let key = format!("{}::{}", crate::sig::strip_tmpl(&cls), last);
+        if db.decls.get(&key).is_some_and(|ds| ds.iter().any(|d| d.params.is_empty())) {
             let mut fields = vec![];
             let full = flat_fields(db, &cls, 0, &mut fields, 0) && fields.len() == stores.len();
             if !full {
@@ -589,7 +564,7 @@ fn construct_from_stores(stores: &[(i32, Expr)], ret: &Type, db: Option<&TypeDb>
     }
     let last = sig::split_scope(&cls).1;
     let last = last.split('<').next().unwrap_or(last);
-    let key = format!("{}::{}", strip_tmpl(&cls), last);
+    let key = format!("{}::{}", crate::sig::strip_tmpl(&cls), last);
     let decls = db.decls.get(&key)?;
     let ok = decls.iter().any(|d| {
         d.params.len() == fields.len()
@@ -689,20 +664,6 @@ fn copy_from_stores(stores: &[(i32, Expr)], ret: &Type, db: Option<&TypeDb>, tem
     })
 }
 
-fn strip_tmpl(s: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0;
-    for c in s.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 fn is_sret_deref(e: &Expr, sret: VarId) -> bool {
     matches!(e, Expr::Load { base, offset: 0, .. } if matches!(**base, Expr::Var(v) if v == sret))
 }
@@ -775,7 +736,7 @@ fn fold_struct_return(body: &mut Vec<Stmt>, sret: VarId, ret: &Type, db: Option<
                 k += 1;
             }
             // temps used outside the window can't be folded away
-            let outside = temp_defs.iter().any(|t| b.iter().enumerate().any(|(j, s)| (j < k || j > rp) && stmt_mentions(s, *t)));
+            let outside = temp_defs.iter().any(|t| b.iter().enumerate().any(|(j, s)| (j < k || j > rp) && Stmt::uses_var(s, *t)));
             // a whole object stored (a call returning it) is no member-wise construction
             let whole = stores.iter().any(|(_, e)| matches!(e, Expr::Call { ret: r, .. } if types::is_aggregate(db, r)));
             if !stores.is_empty() && !whole && !outside {
@@ -971,7 +932,7 @@ fn ctor_init_of(st: &Stmt, this: VarId, own: &str, db: Option<&TypeDb>) -> Optio
         }
     };
     let cls = s.this_class.clone().unwrap_or_default();
-    let direct_base = db.and_then(|db| sig::find_class(db, own)).map_or(true, |c| c.bases.iter().any(|b| sig::norm_name(&b.name) == sig::norm_name(&cls)));
+    let direct_base = db.and_then(|db| sig::find_class(db, own)).is_none_or(|c| c.bases.iter().any(|b| sig::norm_name(&b.name) == sig::norm_name(&cls)));
     let init = |target| Some(Init { target, ctor: Some(s.clone()), args: args.clone(), member_ty: None });
     if is_this(obj, this) && sig::norm_name(&cls) != sig::norm_name(own) && direct_base {
         init(InitTarget::Base(cls))
@@ -1333,7 +1294,7 @@ fn drop_consumed_temps(body: &mut Vec<Stmt>, end: usize, args: &[Expr], vars: &[
         let v = cand[i];
         i += 1;
         let own: Vec<usize> = (0..body.len()).filter(|&j| on_var(&body[j], v)).collect();
-        let others = (0..body.len()).any(|j| !own.contains(&j) && stmt_mentions(&body[j], v));
+        let others = (0..body.len()).any(|j| !own.contains(&j) && Stmt::uses_var(&body[j], v));
         if others || own.is_empty() || own.iter().any(|&j| j >= end - removed && !matches!(body[j], Stmt::Expr(_))) {
             continue;
         }
@@ -1420,7 +1381,7 @@ fn single_store(before: &[Stmt], vs: &[VarId], vars: &[Var], db: Option<&TypeDb>
                 let Expr::Member { offset: 0, .. } = dst else { return None };
                 found = Some(src.clone());
             }
-        } else if vs.iter().any(|&v| stmt_mentions(s, v)) {
+        } else if vs.iter().any(|&v| Stmt::uses_var(s, v)) {
             return None;
         }
     }
@@ -1450,7 +1411,7 @@ fn default_constructible(db: Option<&TypeDb>, t: &Type) -> bool {
     let Some(db) = db else { return true };
     let r = types::resolve(Some(db), t).into_owned();
     let Some(cls) = named(&r) else { return true };
-    let base = strip_tmpl(cls);
+    let base = crate::sig::strip_tmpl(cls);
     let last = sig::split_scope(&base).1.to_string();
     match db.decls.get(&format!("{base}::{last}")) {
         Some(ds) => ds.iter().any(|d| d.params.is_empty()),
@@ -1531,7 +1492,7 @@ fn spellable_in_init(e: &Expr, by_ref: bool, pty: Option<&Type>, before: &[Stmt]
             }
             // never assigned as a whole: a default-constructed temporary (member-wise setup
             // stays in the body); an untyped one is spelled as the parameter's class
-            ([], None) if default_constructible(db, &vars[v].ty) && (named(&vars[v].ty).is_some() || pty.map_or(true, |t| default_constructible(db, t))) => Some(e.clone()),
+            ([], None) if default_constructible(db, &vars[v].ty) && (named(&vars[v].ty).is_some() || pty.is_none_or(|t| default_constructible(db, t))) => Some(e.clone()),
             _ => None,
         };
     }
@@ -1558,7 +1519,7 @@ fn object_from_member_stores(_e: &Expr, v: VarId, pty: Option<&Type>, before: &[
         Some(_) => vars[v].ty.clone(),
         None => pty?.clone(),
     };
-    let cls = named(&types::resolve(Some(db), strip_cv(&cls_t)).into_owned())?.to_string();
+    let cls = named(&types::resolve(Some(db), strip_cv(&cls_t)))?.to_string();
     let mut stores: Vec<(i32, Expr)> = vec![];
     for s in before {
         match s {
@@ -1566,7 +1527,7 @@ fn object_from_member_stores(_e: &Expr, v: VarId, pty: Option<&Type>, before: &[
                 let src = inline_locals(src, before, vars, Some(db), 0)?;
                 stores.push((*offset, src));
             }
-            s if aliases.iter().any(|&x| stmt_mentions(s, x)) && !matches!(s, Stmt::Expr(_)) => return None,
+            s if aliases.iter().any(|&x| Stmt::uses_var(s, x)) && !matches!(s, Stmt::Expr(_)) => return None,
             _ => {}
         }
     }
@@ -1624,7 +1585,7 @@ fn inline_locals(e: &Expr, before: &[Stmt], vars: &[Var], db: Option<&TypeDb>, d
                     })
                     .collect();
                 // also no writes nested in control flow
-                let nested = before.iter().any(|s| !matches!(s, Stmt::Assign { .. } | Stmt::Expr(_)) && stmt_mentions(s, *v));
+                let nested = before.iter().any(|s| !matches!(s, Stmt::Assign { .. } | Stmt::Expr(_)) && Stmt::uses_var(s, *v));
                 // a location it read that a later statement overwrites (a stream read before
                 // the stream pointer advances): the value is gone
                 let stale = defs.len() == 1 && {
@@ -1800,7 +1761,7 @@ fn forward_into(e: &mut Expr, v: VarId, src: &Expr, ref_src: &Expr, ok: &mut boo
                 }
             };
             for (n, a) in args.iter_mut().enumerate() {
-                let is_ref = sig.as_ref().and_then(|s| s.params.get(n)).map_or(false, |p| matches!(strip_cv(&p.ty), Type::Ref(_)));
+                let is_ref = sig.as_ref().and_then(|s| s.params.get(n)).is_some_and(|p| matches!(strip_cv(&p.ty), Type::Ref(_)));
                 if is_ref && matches!(a, Expr::AddrOf(i) if is_v(i)) {
                     // (a temporary binds to a const reference only: a non-const one gets the object)
                     let const_ref = sig.as_ref().and_then(|s| s.params.get(n)).is_some_and(|p| matches!(strip_cv(&p.ty), Type::Ref(x) if matches!(**x, Type::Const(_))));
@@ -1850,7 +1811,7 @@ fn forward_into(e: &mut Expr, v: VarId, src: &Expr, ref_src: &Expr, ok: &mut boo
                 }
             }
             for (n, a) in args.iter_mut().enumerate() {
-                let is_ref = ctor.as_ref().and_then(|s| s.params.get(n)).map_or(false, |p| matches!(strip_cv(&p.ty), Type::Ref(_)));
+                let is_ref = ctor.as_ref().and_then(|s| s.params.get(n)).is_some_and(|p| matches!(strip_cv(&p.ty), Type::Ref(_)));
                 if is_ref && matches!(a, Expr::AddrOf(i) if is_v(i)) {
                     *a = Expr::AddrOf(Box::new(ref_src.clone()));
                 } else {
@@ -1862,20 +1823,10 @@ fn forward_into(e: &mut Expr, v: VarId, src: &Expr, ref_src: &Expr, ok: &mut boo
     }
 }
 
-fn mentions(s: &Stmt, v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1;
-        }
-    });
-    n
-}
-
 /// Methods the inline destructor of `cls` calls (`~basic_string() { internal_dereference(); }`
 /// -> `internal_dereference`).
 fn inline_dtor_callees(db: &TypeDb, cls: &str) -> Vec<String> {
-    let base = strip_tmpl(cls);
+    let base = crate::sig::strip_tmpl(cls);
     let last = sig::split_scope(&base).1.to_string();
     let key = format!("{base}::~{last}");
     let mut out = vec![];
@@ -1893,13 +1844,9 @@ fn inline_dtor_callees(db: &TypeDb, cls: &str) -> Vec<String> {
 
 /// A class destroyed by its own destructor whose whole work is its base's destructor: one
 /// base `base` at offset 0, no members with destructors, an implicit or empty inline destructor
-/// (`TToken<T>` over `CToken`). Shortest name first (any such class compiles the same).
-fn trivially_derived(db: &TypeDb, base: &str) -> Option<String> {
-    trivially_derived_n(db, base, 1)
-}
-
-/// [`trivially_derived`] `depth` levels down (`TLockedToken<T>` over `TToken<T>` over `CToken`:
-/// each level's inline destructor tests its object once).
+/// (`TToken<T>` over `CToken`), `depth` levels down (`TLockedToken<T>` over `TToken<T>` over
+/// `CToken`: each level's inline destructor tests its object once). Shortest name first (any
+/// such class compiles the same).
 fn trivially_derived_n(db: &TypeDb, base: &str, depth: usize) -> Option<String> {
     if depth == 0 {
         return Some(base.to_string());
@@ -1920,7 +1867,7 @@ fn trivially_derived_n(db: &TypeDb, base: &str, depth: usize) -> Option<String> 
             continue;
         }
         let Some(full) = trivially_derived_n(db, name, depth - 1) else { continue };
-        if best.as_ref().map_or(true, |b| full.len() < b.len() || (full.len() == b.len() && full < *b)) {
+        if best.as_ref().is_none_or(|b| full.len() < b.len() || (full.len() == b.len() && full < *b)) {
             best = Some(full);
         }
     }
@@ -1929,7 +1876,7 @@ fn trivially_derived_n(db: &TypeDb, base: &str, depth: usize) -> Option<String> 
 
 /// The destructor of `cls` when it is inline, its whole body a call of the non-public method `m`.
 fn dtor_body_of(db: &TypeDb, cls: &str, m: &mwdec_core::FuncSig) -> Option<mwdec_core::FuncSig> {
-    let key = strip_tmpl(cls);
+    let key = crate::sig::strip_tmpl(cls);
     let last = sig::split_scope(&key).1.to_string();
     let name = sig::split_scope(&m.qualified_name).1.to_string();
     let dt = db.decls.get(&format!("{key}::~{last}"))?;
@@ -1944,7 +1891,7 @@ fn dtor_body_of(db: &TypeDb, cls: &str, m: &mwdec_core::FuncSig) -> Option<mwdec
     Some(mwdec_core::FuncSig { qualified_name: format!("{cls}::~{}", cl.split('<').next().unwrap_or(&cl)), mangled: None, ret: Type::Void, params: vec![], this_class: Some(cls.to_string()), is_const: false, is_static: false, is_virtual: false, variadic: false, runs_code: false })
 }
 
-/// Is `d` a class `depth` trivial levels above `base` (see [`trivially_derived`])?
+/// Is `d` a class `depth` trivial levels above `base` (see [`trivially_derived_n`])?
 fn derives_trivially(db: &TypeDb, d: &str, base: &str, depth: usize) -> bool {
     if depth == 0 {
         return sig::norm_name(d) == sig::norm_name(base);
@@ -1988,7 +1935,7 @@ fn base_destructor_calls(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
     let inline_dtor = |cls: &str| -> bool {
         let last = sig::split_scope(cls).1;
         let lb = last.split('<').next().unwrap_or(last);
-        let keys = [format!("{cls}::~{lb}"), format!("{cls}::~{last}"), format!("{}::~{lb}", strip_tmpl(cls))];
+        let keys = [format!("{cls}::~{lb}"), format!("{cls}::~{last}"), format!("{}::~{lb}", crate::sig::strip_tmpl(cls))];
         keys.iter().find_map(|k| db.decls.get(k)).is_some_and(|ds| !ds.is_empty() && ds.iter().all(|d| d.is_inline_defined))
     };
     Stmt::for_each_block_mut(body, &mut |b| {
@@ -2059,7 +2006,7 @@ fn base_destructor_calls(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
 /// end of the full expression, right after the call).
 pub fn constructed_arg_temporaries(body: &mut Vec<Stmt>, vars: &[Var]) {
     let snapshot = body.clone();
-    let total = |v: VarId| -> usize { snapshot.iter().map(|s| mentions(s, v)).sum() };
+    let total = |v: VarId| -> usize { snapshot.iter().map(|s| Stmt::count_var(s, v)).sum() };
     let on = |e: &Expr| -> Option<VarId> {
         match e {
             Expr::AddrOf(x) => match &**x {
@@ -2107,7 +2054,7 @@ pub fn constructed_arg_temporaries(body: &mut Vec<Stmt>, vars: &[Var]) {
                 Stmt::Expr(Expr::Call { args, .. }) => usize::from(args.iter().any(|a| a.uses_var(v))),
                 _ => 0,
             };
-            if !destroys(&b[i + 2], v) || defm != 0 || mentions(&b[i + 1], v) != 1 || total(v) != mentions(&b[i], v) + 1 + mentions(&b[i + 2], v) {
+            if !destroys(&b[i + 2], v) || defm != 0 || Stmt::count_var(&b[i + 1], v) != 1 || total(v) != Stmt::count_var(&b[i], v) + 1 + Stmt::count_var(&b[i + 2], v) {
                 i += 1;
                 continue;
             }
@@ -2168,7 +2115,7 @@ pub fn constructed_arg_temporaries(body: &mut Vec<Stmt>, vars: &[Var]) {
 /// objects at the end of their scope), so the call is no statement of the source; dropping it
 /// also lets a call result used once become the temporary it was.
 fn drop_frame_object_dtor_calls(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
-    let total = |body: &Vec<Stmt>, v: VarId| -> usize { body.iter().map(|s| mentions(s, v)).sum() };
+    let total = |body: &Vec<Stmt>, v: VarId| -> usize { body.iter().map(|s| Stmt::count_var(s, v)).sum() };
     let snapshot = body.clone();
     let on_object = |e: &Expr, v: VarId| -> bool {
         match e {
@@ -2210,8 +2157,8 @@ fn drop_frame_object_dtor_calls(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb)
         let mut i = 0;
         while i < b.len() {
             if let Some(v) = dtor_call(&b[i]) {
-                let before: usize = b[..=i].iter().map(|s| mentions(s, v)).sum();
-                let here = mentions(&b[i], v);
+                let before: usize = b[..=i].iter().map(|s| Stmt::count_var(s, v)).sum();
+                let here = Stmt::count_var(&b[i], v);
                 // the last mention, after the object was used, nothing elsewhere; or a member
                 // object mentioned nowhere else (destroyed with the object around it)
                 // (an object left an untyped buffer keeps its destructor call: nothing else
@@ -2302,7 +2249,7 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
     Stmt::for_each_block_mut(&mut body.clone(), &mut |b| {
         for st in b.iter() {
             if let Stmt::Assign { dst: Expr::Var(w), src } = st {
-                if src.has_call() && matches!(vars[*w].kind, VarKind::Stack { .. }) && body.iter().map(|x| mentions(x, *w)).sum::<usize>() == 2 {
+                if src.has_call() && matches!(vars[*w].kind, VarKind::Stack { .. }) && body.iter().map(|x| Stmt::count_var(x, *w)).sum::<usize>() == 2 {
                     forwardable.insert(*w);
                 }
             }
@@ -2313,11 +2260,11 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
         .iter()
         .enumerate()
         .filter_map(|(v, var)| match var.kind {
-            VarKind::Stack { offset, size } if named(&var.ty).is_some() && !body.iter().any(|s| stmt_mentions(s, v)) => Some((var.ty.clone(), offset, size)),
+            VarKind::Stack { offset, size } if named(&var.ty).is_some() && !body.iter().any(|s| Stmt::uses_var(s, v)) => Some((var.ty.clone(), offset, size)),
             _ => None,
         })
         .collect();
-    let total = |body: &Vec<Stmt>, v: VarId| -> usize { body.iter().map(|s| mentions(s, v)).sum() };
+    let total = |body: &Vec<Stmt>, v: VarId| -> usize { body.iter().map(|s| Stmt::count_var(s, v)).sum() };
     let snapshot = body.clone();
     let mut counts: std::collections::HashMap<VarId, usize> = std::collections::HashMap::new();
     for (v, var) in vars.iter().enumerate() {
@@ -2346,7 +2293,7 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
                 if let Some((v, dst, _)) = def_lv(&b[i]) {
                     // (a redefinition is no read: `v = a; v = b;`)
                     let redef = matches!(&b[i + 1], Stmt::Assign { dst: d, .. } if d.uses_var(v));
-                    if !redef && mentions(&b[i + 1], v) == 1 && matches!(b[i + 1], Stmt::Expr(_) | Stmt::Assign { .. } | Stmt::Return(_)) {
+                    if !redef && Stmt::count_var(&b[i + 1], v) == 1 && matches!(b[i + 1], Stmt::Expr(_) | Stmt::Assign { .. } | Stmt::Return(_)) {
                         let mut found = false;
                         Stmt::walk_exprs(std::slice::from_ref(&b[i + 1]), &mut |e| {
                             if *e == dst {
@@ -2374,7 +2321,7 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
                                 *e = src.clone();
                             }
                         });
-                        if mentions(&s, v) == 0 {
+                        if Stmt::count_var(&s, v) == 0 {
                             b[i + 1] = s;
                             b.remove(i);
                             continue;
@@ -2411,7 +2358,7 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
                 let mut wide = false;
                 Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
                     if let Expr::Member { base, offset, ty } = e {
-                        if matches!(**base, Expr::Var(x) if x == v) && scalar_size(ty).map_or(false, |n| *offset as i64 + n as i64 > have as i64) {
+                        if matches!(**base, Expr::Var(x) if x == v) && scalar_size(ty).is_some_and(|n| *offset as i64 + n as i64 > have as i64) {
                             wide = true;
                         }
                     }
@@ -2419,12 +2366,12 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
                 wide
             };
             if let Some((v, src)) = cand {
-                if src.has_call() && mentions(&b[i + 1], v) == 1 && forward_breaks_layout(v, &b[i + 1], vars, &folded, &forwardable) {
+                if src.has_call() && Stmt::count_var(&b[i + 1], v) == 1 && forward_breaks_layout(v, &b[i + 1], vars, &folded, &forwardable) {
                     kept.push(v);
                     i += 1;
                     continue;
                 }
-                if mentions(&b[i + 1], v) == 1 && !wider_read(v, &src, &b[i + 1]) && !matches!(b[i + 1], Stmt::If { .. } | Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::Switch { .. }) {
+                if Stmt::count_var(&b[i + 1], v) == 1 && !wider_read(v, &src, &b[i + 1]) && !matches!(b[i + 1], Stmt::If { .. } | Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::Switch { .. }) {
                     let mut s = b[i + 1].clone();
                     let mut ok = true;
                     // an object copied into the frame from another object, then passed by
@@ -2446,7 +2393,7 @@ pub fn forward_stack_objects(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&Typ
                         Stmt::Expr(e) | Stmt::Return(Some(e)) => forward_into(e, v, &src, &ref_src, &mut ok),
                         _ => ok = false,
                     }
-                    if ok && mentions(&s, v) == 0 {
+                    if ok && Stmt::count_var(&s, v) == 0 {
                         b[i + 1] = s;
                         b.remove(i);
                         // the previous statement may feed the merged one too (`T a = f(); T b = g();
@@ -2473,16 +2420,6 @@ pub fn defines_object(s: &Stmt, v: VarId) -> bool {
     }
 }
 
-pub fn stmt_mentions(s: &Stmt, v: VarId) -> bool {
-    let mut found = false;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            found = true;
-        }
-    });
-    found
-}
-
 /// Stack objects (class-typed) that can be declared where they are first defined: the first
 /// statement mentioning them defines them entirely, and every later mention is in the same
 /// statement list (so the declaration's scope covers all uses).
@@ -2491,7 +2428,7 @@ pub fn decl_at_first_def(body: &[Stmt], vars: &[Var]) -> HashSet<VarId> {
         // stack objects, register locals holding a small object (`TUniqueId id = ...`), and
         // const scalars (initialized where declared)
         let small_object = matches!(var.kind, VarKind::Local)
-            && named(&var.ty).map_or(false, |n| (n.starts_with(|c: char| c.is_ascii_uppercase()) && crate::types::is_aggregate(None, &var.ty)) || n.ends_with("::iterator") || n.ends_with("::const_iterator"));
+            && named(&var.ty).is_some_and(|n| (n.starts_with(|c: char| c.is_ascii_uppercase()) && crate::types::is_aggregate(None, &var.ty)) || n.ends_with("::iterator") || n.ends_with("::const_iterator"));
         let const_scalar = matches!(var.kind, VarKind::Local) && matches!(&var.ty, Type::Const(t) if matches!(**t, Type::Bool));
         matches!(var.kind, VarKind::Stack { .. }) || small_object || const_scalar
     })
@@ -2537,7 +2474,7 @@ fn first_def_decls(body: &[Stmt], vars: &[Var], pick: &dyn Fn(&Var) -> bool) -> 
         // own statements are scanned before nested lists, and a mention inside a nested statement
         // also counts as a mention by its parent statement)
         for l in &all {
-            let Some(i) = l.iter().position(|s| stmt_mentions(s, v)) else { continue };
+            let Some(i) = l.iter().position(|s| Stmt::uses_var(s, v)) else { continue };
             // a compound statement whose own expression doesn't mention v: look inside it
             let own_mention = match &l[i] {
                 Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => Some(cond.uses_var(v)),
@@ -2550,16 +2487,16 @@ fn first_def_decls(body: &[Stmt], vars: &[Var], pick: &dyn Fn(&Var) -> bool) -> 
             }
             // a loop whose init defines it, every mention in the loop: `for (T v = ...; ...)`
             if let Stmt::For { init, .. } = &l[i] {
-                let total: usize = body.iter().map(|s| count_mentions(s, v)).sum();
-                if named(&var.ty).is_some() && init.first().is_some_and(|s| defines_object(s, v)) && count_mentions(&l[i], v) == total {
+                let total: usize = body.iter().map(|s| Stmt::count_var(s, v)).sum();
+                if named(&var.ty).is_some() && init.first().is_some_and(|s| defines_object(s, v)) && Stmt::count_var(&l[i], v) == total {
                     out.insert(v);
                 }
                 break;
             }
             if defines_object(&l[i], v) {
                 // all mentions of v must be inside l[i..]
-                let total: usize = body.iter().map(|s| count_mentions(s, v)).sum();
-                let inside: usize = l[i..].iter().map(|s| count_mentions(s, v)).sum();
+                let total: usize = body.iter().map(|s| Stmt::count_var(s, v)).sum();
+                let inside: usize = l[i..].iter().map(|s| Stmt::count_var(s, v)).sum();
                 if total == inside {
                     out.insert(v);
                 }
@@ -2570,31 +2507,17 @@ fn first_def_decls(body: &[Stmt], vars: &[Var], pick: &dyn Fn(&Var) -> bool) -> 
     out
 }
 
-pub fn count_mentions(s: &Stmt, v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1;
-        }
-    });
-    n
-}
-
 
 /// Stack slots that are written but never read (compiler temporaries the source never named,
-/// e.g. the extra copy MWCC makes when passing a struct by value): drop the stores.
-pub fn drop_dead_stack_stores(body: &mut Vec<Stmt>, vars: &[Var]) {
-    drop_dead_stack_stores_kept(body, vars);
-}
-
-/// [`drop_dead_stack_stores`], returning what was dropped (in frame-offset order, `order` unset).
+/// e.g. the extra copy MWCC makes when passing a struct by value): drop the stores, returning
+/// what was dropped (in frame-offset order, `order` unset).
 pub fn drop_dead_stack_stores_kept(body: &mut Vec<Stmt>, vars: &[Var]) -> Vec<DeadStackStore> {
     let mut dropped: Vec<DeadStackStore> = vec![];
     for (v, var) in vars.iter().enumerate() {
         if !matches!(var.kind, VarKind::Stack { .. }) {
             continue;
         }
-        let total: usize = body.iter().map(|s| count_mentions(s, v)).sum();
+        let total: usize = body.iter().map(|s| Stmt::count_var(s, v)).sum();
         if total == 0 {
             continue;
         }
@@ -2661,7 +2584,7 @@ pub fn is_abstract(db: &TypeDb, cls: &str) -> bool {
         if depth > 12 {
             return false;
         }
-        let key = strip_tmpl(cls);
+        let key = crate::sig::strip_tmpl(cls);
         let prefix = format!("{key}::");
         let mut pure = vec![];
         for (name, ds) in db.decls.range(prefix.clone()..) {
@@ -2705,7 +2628,7 @@ pub fn untype_undeclarable(body: &[Stmt], vars: &mut [Var], db: Option<&TypeDb>)
         if at_def.contains(&v) {
             continue;
         }
-        let key = format!("{}::{}", strip_tmpl(&cls), strip_tmpl(sig::split_scope(&cls).1));
+        let key = format!("{}::{}", crate::sig::strip_tmpl(&cls), crate::sig::strip_tmpl(sig::split_scope(&cls).1));
         let has_default = match db.decls.get(&key) {
             // (or every parameter defaulted: `vector(const Alloc& = Alloc())`)
             Some(ds) => ds.iter().any(|d| d.params.is_empty() || (d.defaults.len() == d.params.len() && d.defaults.iter().all(|x| x.is_some()))),
@@ -2809,7 +2732,7 @@ fn optional_object_return(ir: &IrFunction, sret: VarId, db: &TypeDb) -> Option<S
         return None;
     }
     let mut stores: Vec<(i32, Option<u32>, Expr)> = vec![];
-    each_stmt(&ir.body, &mut |s| {
+    Stmt::each(&ir.body, &mut |s| {
         if let Stmt::Assign { dst: Expr::Load { base, offset, ty }, src } = s {
             if matches!(&**base, Expr::Var(v) if *v == sret) {
                 stores.push((*offset, scalar_size(ty), src.clone()));

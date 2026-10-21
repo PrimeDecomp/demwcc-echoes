@@ -7,7 +7,7 @@
 //! body is empty and whose initializer list sets members to literals (recursively for members
 //! of class type that are not in its list).
 
-use crate::util::strip;
+use mwdec_lift::strip_cv;
 use mwdec_core::{DeclInfo, Type, TypeDb};
 use mwdec_lift::{Expr, InitTarget, IrFunction, Stmt, VarId, VarKind};
 use std::collections::HashMap;
@@ -45,18 +45,18 @@ fn literal(toks: &[&str], ty: &Type) -> Option<i64> {
         _ => (false, toks),
     };
     let [t] = toks else { return None };
-    let is_float = matches!(strip(ty), Type::Float { .. });
+    let is_float = matches!(strip_cv(ty), Type::Float { .. });
     let v: i64 = match *t {
         "false" | "nullptr" | "NULL" => 0,
         "true" => 1,
         _ => {
-            let s = t.trim_end_matches(|c| matches!(c, 'u' | 'U' | 'l' | 'L'));
+            let s = t.trim_end_matches(['u', 'U', 'l', 'L']);
             if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                 i64::from_str_radix(h, 16).ok()?
             } else if let Ok(v) = s.parse::<i64>() {
                 v
             } else if is_float {
-                let f: f32 = t.trim_end_matches(|c| matches!(c, 'f' | 'F')).parse().ok()?;
+                let f: f32 = t.trim_end_matches(['f', 'F']).parse().ok()?;
                 let f = if neg { -f } else { f };
                 return Some(f.to_bits() as i64);
             } else {
@@ -67,7 +67,7 @@ fn literal(toks: &[&str], ty: &Type) -> Option<i64> {
     let v = if neg { -v } else { v };
     if is_float {
         // an integer literal converted to float
-        return (*strip(ty) == Type::Float { size: 4 }).then(|| (v as f32).to_bits() as i64);
+        return (*strip_cv(ty) == Type::Float { size: 4 }).then(|| (v as f32).to_bits() as i64);
     }
     Some(v)
 }
@@ -128,7 +128,7 @@ fn ctor_stores(db: &TypeDb, cls: &str, d: &DeclInfo, literal_only: bool, depth: 
             // an empty member (an allocator) copied from anything stores nothing
             Some(_) if empty_class(db, &fty) => {}
             Some((_, args)) => {
-                let size = mwdec_lift::scalar_size(strip(&fty));
+                let size = mwdec_lift::scalar_size(strip_cv(&fty));
                 match (size, literal(args, &fty)) {
                     (Some(s @ (1 | 2 | 4)), Some(v)) => out.push((f.offset as i32, s, v)),
                     _ if literal_only => {}
@@ -161,8 +161,8 @@ fn empty_class(db: &TypeDb, t: &Type) -> bool {
 /// `const A&` with `A` an allocator: a class template parameter named like one, or an empty
 /// class.
 fn allocator_param(db: &TypeDb, d: &DeclInfo, t: &Type) -> bool {
-    let Type::Ref(inner) = strip(t) else { return false };
-    match strip(inner) {
+    let Type::Ref(inner) = strip_cv(t) else { return false };
+    match strip_cv(inner) {
         Type::Named(n) if d.template_params.iter().any(|p| p == n) => n.contains("Alloc"),
         inner => empty_class(db, inner),
     }
@@ -252,7 +252,7 @@ pub fn strip_member_ctor_stores(ir: &mut IrFunction, db: &TypeDb) -> usize {
         }
         let Some(off) = lv_off(dst, this) else { break };
         let size = match dst {
-            Expr::Load { ty, .. } | Expr::Member { ty, .. } => mwdec_lift::scalar_size(strip(ty)),
+            Expr::Load { ty, .. } | Expr::Member { ty, .. } => mwdec_lift::scalar_size(strip_cv(ty)),
             _ => None,
         };
         if let (Some(size), Some(v)) = (size, const_value(src)) {

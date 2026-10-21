@@ -10,6 +10,7 @@
 use crate::probe::CallKind;
 use crate::template::{HoleKind, Shape, Template};
 use crate::util::*;
+use mwdec_lift::strip_cv;
 use crate::InlineLib;
 use mwdec_core::{Type, TypeDb};
 use mwdec_lift::types::ty_of;
@@ -83,8 +84,8 @@ fn commutative(op: BinOp) -> bool {
 
 /// Coarse value class for type checks: 1 float, 2 pointer, 3 integer, 4 class, 0 unknown.
 fn vclass(t: &Type, db: &TypeDb) -> u8 {
-    let r = mwdec_lift::types::resolve(Some(db), strip(t)).into_owned();
-    match strip(&r) {
+    let r = mwdec_lift::types::resolve(Some(db), strip_cv(t)).into_owned();
+    match strip_cv(&r) {
         Type::Float { .. } => 1,
         Type::Ptr(_) | Type::Ref(_) | Type::FuncPtr(_) => 2,
         Type::Int { .. } | Type::Long { .. } | Type::Char | Type::WChar | Type::Bool => 3,
@@ -102,7 +103,7 @@ fn compat(a: &Type, b: &Type, db: &TypeDb) -> bool {
 /// Is the cast to `to` a value-preserving widening of an integer of type `from` (zero
 /// extension of an unsigned narrow type, or sign extension to a signed one)?
 fn widening(to: &Type, from: &Type) -> bool {
-    match (strip(to), strip(from)) {
+    match (strip_cv(to), strip_cv(from)) {
         (Type::Int { size: 4, signed: s }, Type::Int { size: n, signed: f }) => *n < 4 && (!*f || *s),
         (Type::Int { size: 4, .. }, Type::Bool | Type::Char) => true,
         _ => false,
@@ -125,7 +126,7 @@ fn pat_canon(p: &Expr, holes: &[HoleKind]) -> Option<(usize, i32)> {
     let is_obj = |h: &usize| matches!(holes.get(*h), Some(HoleKind::Obj { .. }));
     match p {
         Expr::Var(h) if is_obj(h) => Some((*h, 0)),
-        Expr::Cast { ty, e } if matches!(strip(ty), Type::Ptr(_)) => pat_canon(e, holes),
+        Expr::Cast { ty, e } if matches!(strip_cv(ty), Type::Ptr(_)) => pat_canon(e, holes),
         Expr::AddrOf(x) => match &**x {
             Expr::Load { base, offset, .. } => pat_canon(base, holes).map(|(h, k)| (h, k + offset)),
             Expr::Member { base, offset, .. } => match &**base {
@@ -136,7 +137,7 @@ fn pat_canon(p: &Expr, holes: &[HoleKind]) -> Option<(usize, i32)> {
             _ => None,
         },
         Expr::Binary { op: BinOp::Add, l, r, .. } => match (&**l, &**r) {
-            (Expr::Cast { ty, e }, Expr::Int { value, .. }) if matches!(strip(ty), Type::Ptr(inner) if mwdec_lift::scalar_size(inner) == Some(1)) => {
+            (Expr::Cast { ty, e }, Expr::Int { value, .. }) if matches!(strip_cv(ty), Type::Ptr(inner) if mwdec_lift::scalar_size(inner) == Some(1)) => {
                 pat_canon(e, holes).map(|(h, k)| (h, k + *value as i32))
             }
             _ => None,
@@ -266,7 +267,7 @@ impl<'a, 'e> M<'a, 'e> {
                 _ => None,
             };
             let folded = matches!(tc, Callee::Direct { sig, .. } | Callee::Method { sig, .. } if sig.mangled.is_none());
-            if folded && name(pc) != name(tc) && std::env::var("MWDI_UNFOLD_CALL").is_ok() {
+            if folded && name(pc) != name(tc) && env_flag!("MWDI_UNFOLD_CALL") {
                 if let Some(u) = unfold(res(t, defs), self.env) {
                     if matches!(u, Expr::Call { .. }) {
                         let snap = self.b.clone();
@@ -344,7 +345,7 @@ impl<'a, 'e> M<'a, 'e> {
         if let Some((h, off, ty)) = comp_of(p, &self.t.holes) {
             // a pointer component read as a word (`(unsigned int)it.mNode == 0`)
             let t = match res(t, defs) {
-                Expr::Cast { ty: ct, e: inner } if matches!(strip(ct), Type::Int { size: 4, .. }) && vclass(ty, self.env.db) == 2 && vclass(&ty_of(res(inner, defs), self.env.vars), self.env.db) == 2 => &**inner,
+                Expr::Cast { ty: ct, e: inner } if matches!(strip_cv(ct), Type::Int { size: 4, .. }) && vclass(ty, self.env.db) == 2 && vclass(&ty_of(res(inner, defs), self.env.vars), self.env.db) == 2 => &**inner,
                 // a narrow member widened for the compare (`(unsigned int)a.m == ...`)
                 Expr::Cast { ty: ct, e: inner } if widening(ct, ty) && widening(ct, &ty_of(res(inner, defs), self.env.vars)) => &**inner,
                 _ => t,
@@ -391,7 +392,7 @@ impl<'a, 'e> M<'a, 'e> {
                 }
                 // a float parameter can't take a double value (only a double literal the compiler
                 // widened from a float one)
-                if matches!(strip(ty), Type::Float { size: 4 }) && matches!(strip(&ty_of(rt, self.env.vars)), Type::Float { size: 8 }) && std::env::var("MWDI_NO_F64CHECK").is_err() {
+                if matches!(strip_cv(ty), Type::Float { size: 4 }) && matches!(strip_cv(&ty_of(rt, self.env.vars)), Type::Float { size: 8 }) && !env_flag!("MWDI_NO_F64CHECK") {
                     let narrow_lit = matches!(rt, Expr::Float { bits, double: true } if (f64::from_bits(*bits) as f32) as f64 == f64::from_bits(*bits));
                     if !narrow_lit {
                         return false;
@@ -401,7 +402,7 @@ impl<'a, 'e> M<'a, 'e> {
             if let Some(HoleKind::Obj { ptr: false, .. }) = self.t.holes.get(*h) {
                 // a reference parameter used as the object itself (`*this = other`): bound to
                 // the object's address
-                if matches!(rt, Expr::Load { .. } | Expr::Member { .. } | Expr::Global { .. }) && matches!(strip(&ty_of(rt, self.env.vars)), Type::Named(_)) {
+                if matches!(rt, Expr::Load { .. } | Expr::Member { .. } | Expr::Global { .. }) && matches!(strip_cv(&ty_of(rt, self.env.vars)), Type::Named(_)) {
                     return self.bind_addr(*h, Expr::AddrOf(Box::new(rt.clone())));
                 }
             }
@@ -415,7 +416,7 @@ impl<'a, 'e> M<'a, 'e> {
                 }
                 // (a pointer value used through a cast: `((int*)p)[i]` for `p[i]`; a word read
                 // again with another signedness: `(unsigned int)n >> 5` for `n & 31`'s `n`)
-                Some(Bind::Val(x)) => teq(x, t, defs) || matches!(t, Expr::Cast { ty, e } if matches!(strip(ty), Type::Ptr(_)) && teq(x, e, defs)) || teq(same_word(res(x, defs), self.env), same_word(res(t, defs), self.env), defs),
+                Some(Bind::Val(x)) => teq(x, t, defs) || matches!(t, Expr::Cast { ty, e } if matches!(strip_cv(ty), Type::Ptr(_)) && teq(x, e, defs)) || teq(same_word(res(x, defs), self.env), same_word(res(t, defs), self.env), defs),
                 Some(Bind::Comps(_)) => false,
             }
         } else {
@@ -432,12 +433,12 @@ impl<'a, 'e> M<'a, 'e> {
             }
             // pointer casts don't change values
             if let Expr::Cast { ty, e: inner } = t {
-                if matches!(strip(ty), Type::Ptr(_)) && !matches!(p, Expr::Cast { .. }) {
+                if matches!(strip_cv(ty), Type::Ptr(_)) && !matches!(p, Expr::Cast { .. }) {
                     return self.m(p, inner);
                 }
             }
             if let Expr::Cast { ty, e: inner } = p {
-                if matches!(strip(ty), Type::Ptr(_)) && !matches!(t, Expr::Cast { .. }) {
+                if matches!(strip_cv(ty), Type::Ptr(_)) && !matches!(t, Expr::Cast { .. }) {
                     return self.m(inner, t);
                 }
             }
@@ -445,7 +446,7 @@ impl<'a, 'e> M<'a, 'e> {
             // index 0 added to `pos` folded away): only with that temporary's zero stored, dead,
             // in the frame
             if let Expr::Binary { op: BinOp::Add, l, r, ty } = p {
-                if !matches!(t, Expr::Binary { op: BinOp::Add, .. }) && vclass(ty, self.env.db) != 1 && std::env::var_os("MWDI_NO_ZERO_MEMBERS").is_none() && dead_zero_word() {
+                if !matches!(t, Expr::Binary { op: BinOp::Add, .. }) && vclass(ty, self.env.db) != 1 && !env_flag!("MWDI_NO_ZERO_MEMBERS") && dead_zero_word() {
                     for (z, other) in [(l, r), (r, l)] {
                         if comp_of(z, &self.t.holes).is_some() {
                             let snap = self.b.clone();
@@ -469,16 +470,16 @@ impl<'a, 'e> M<'a, 'e> {
             }
             // a pointer read as a word (`(unsigned int)p == 0`: the lifter's view of `cmplwi`)
             if let Expr::Cast { ty, e: inner } = t {
-                if matches!(strip(ty), Type::Int { size: 4, .. }) && !matches!(p, Expr::Cast { .. }) && vclass(&ty_of(res(inner, defs), self.env.vars), self.env.db) == 2 {
+                if matches!(strip_cv(ty), Type::Int { size: 4, .. }) && !matches!(p, Expr::Cast { .. }) && vclass(&ty_of(res(inner, defs), self.env.vars), self.env.db) == 2 {
                     return self.m(p, inner);
                 }
             }
             // a constant argument the compiler folded into the expansion (`Lerp(a, b, 3.14f)`:
             // `(1.0f - t)` became `-2.1415927f`): solve the pattern for its free hole
-            if matches!(t, Expr::Float { .. } | Expr::Int { .. }) && matches!(p, Expr::Binary { .. } | Expr::Unary { .. } | Expr::Cast { .. }) && std::env::var("MWDI_NO_SOLVE").is_err() {
+            if matches!(t, Expr::Float { .. } | Expr::Int { .. }) && matches!(p, Expr::Binary { .. } | Expr::Unary { .. } | Expr::Cast { .. }) && !env_flag!("MWDI_NO_SOLVE") {
                 if let Some(c) = Num::of(t) {
                     let snap = self.b.clone();
-                    if std::env::var("MWDI_TRACE_SOLVE").is_ok() {
+                    if env_flag!("MWDI_TRACE_SOLVE") {
                         eprintln!("SOLVE {} {p:?} = {c:?}", self.t.name);
                     }
                     if self.solve(p, c, 0) {
@@ -551,7 +552,7 @@ impl<'a, 'e> M<'a, 'e> {
                     ok && args.iter().zip(a2).all(|(x, y)| self.m(x, y))
                 }
                 // a ternary decided by constant arguments: the compiler kept one arm (constfold.rs)
-                (Expr::Ternary { c, t: a, f, .. }, _) if std::env::var("MWDI_NO_CONSTIF").is_err() && crate::constfold::decidable(c, &self.t.holes) => {
+                (Expr::Ternary { c, t: a, f, .. }, _) if !env_flag!("MWDI_NO_CONSTIF") && crate::constfold::decidable(c, &self.t.holes) => {
                     let snap = self.b.clone();
                     if self.m(a, t) && crate::constfold::solve(c, true, self) {
                         return true;
@@ -745,11 +746,11 @@ impl<'a, 'e> M<'a, 'e> {
             }
             // a scalar parameter the expansion never reads (an overload's tag enum, `SetColumn(kDZ,
             // v)`): any value compiles the same; the enum's first value / zero
-            if self.b[h].is_none() && std::env::var("MWDI_NO_UNUSED_ARG").is_err() {
+            if self.b[h].is_none() && !env_flag!("MWDI_NO_UNUSED_ARG") {
                 if let HoleKind::Scalar(ty) = k {
-                    let rt = mwdec_lift::types::resolve(Some(self.env.db), strip(ty)).into_owned();
+                    let rt = mwdec_lift::types::resolve(Some(self.env.db), strip_cv(ty)).into_owned();
                     let zero = if mwdec_lift::types::is_enum(Some(self.env.db), &rt) {
-                        Some(Expr::Cast { ty: strip(ty).clone(), e: Box::new(Expr::Int { value: 0, ty: Type::Int { size: 4, signed: true } }) })
+                        Some(Expr::Cast { ty: strip_cv(ty).clone(), e: Box::new(Expr::Int { value: 0, ty: Type::Int { size: 4, signed: true } }) })
                     } else {
                         // (only tags: a constructor's unread scalar would explain an object by
                         // zeros, `CAABox(x, y, 0, 0, 0, z).GetPointE()`)
@@ -775,7 +776,7 @@ impl<'a, 'e> M<'a, 'e> {
             match (k, b) {
                 // a float parameter given a double literal the compiler widened at compile time
                 // (`fmodf(3.1415927f, ..)` -> `fmod(3.1415927410125732, ..)`): the float literal
-                (HoleKind::Scalar(ty), Bind::Val(Expr::Float { bits, double: true })) if std::env::var("MWDI_NO_SOLVE").is_err() && matches!(strip(ty), Type::Float { size: 4 }) && (f64::from_bits(*bits) as f32) as f64 == f64::from_bits(*bits) => {
+                (HoleKind::Scalar(ty), Bind::Val(Expr::Float { bits, double: true })) if !env_flag!("MWDI_NO_SOLVE") && matches!(strip_cv(ty), Type::Float { size: 4 }) && (f64::from_bits(*bits) as f32) as f64 == f64::from_bits(*bits) => {
                     out.push(Expr::Float { bits: (f64::from_bits(*bits) as f32).to_bits() as u64, double: false })
                 }
                 (HoleKind::Scalar(_), Bind::Val(e)) => out.push(e.clone()),
@@ -810,7 +811,7 @@ impl<'a, 'e> M<'a, 'e> {
                                 // a variable holding the object itself (a parameter the lifter
                                 // keeps as a value)
                                 out.push(e.clone());
-                            } else if !*ptr && matches!(k, HoleKind::Obj { temp_ok: true, .. }) && matches!(strip(&ty_of(res(e, self.env.defs), self.env.vars)), Type::Ptr(x) if matches!(strip(x), Type::Int { size: 1, .. } | Type::Void | Type::Unknown { .. })) {
+                            } else if !*ptr && matches!(k, HoleKind::Obj { temp_ok: true, .. }) && matches!(strip_cv(&ty_of(res(e, self.env.defs), self.env.vars)), Type::Ptr(x) if matches!(strip_cv(x), Type::Int { size: 1, .. } | Type::Void | Type::Unknown { .. })) {
                                 // a const reference argument reached through a byte pointer
                                 // (`(char*)items + i * 8`): the object there, cast
                                 out.push(Expr::Cast { ty: Type::Ptr(Box::new(Type::Const(Box::new(Type::Named(class.clone()))))), e: Box::new(e.clone()) });
@@ -838,7 +839,7 @@ impl<'a, 'e> M<'a, 'e> {
                         // (a one-member object built around a scalar, `sine(CRelAngle::FromRadians(x))`
                         // for `sinf(x)`, explains nothing more than the scalar: no bonus, a tie-break
                         // penalty)
-                        if m.len() == 1 && std::env::var("MWDI_NO_SINGLE_EXPLAIN_PENALTY").is_err() {
+                        if m.len() == 1 && !env_flag!("MWDI_NO_SINGLE_EXPLAIN_PENALTY") {
                             // (keep its penalties: a constructor fallback stays a last resort)
                             score += sc.min(0) - 1;
                         } else {
@@ -884,7 +885,7 @@ impl Num {
         match e {
             Expr::Float { bits, double: false } => Some(Num::F32(f32::from_bits(*bits as u32))),
             Expr::Float { bits, double: true } => Some(Num::F64(f64::from_bits(*bits))),
-            Expr::Int { value, ty } => match strip(ty) {
+            Expr::Int { value, ty } => match strip_cv(ty) {
                 Type::Int { size, signed } => Some(Num::I(*value, *size, *signed)),
                 Type::Bool | Type::Char => Some(Num::I(*value, 1, false)),
                 _ => Some(Num::I(*value, 4, true)),
@@ -930,7 +931,7 @@ impl Num {
         }
     }
     fn cast(&self, ty: &Type) -> Option<Num> {
-        Some(match (strip(ty), self) {
+        Some(match (strip_cv(ty), self) {
             (Type::Float { size: 4 }, Num::F32(v)) => Num::F32(*v),
             (Type::Float { size: 4 }, Num::F64(v)) => Num::F32(*v as f32),
             (Type::Float { size: 4 }, Num::I(v, ..)) => Num::F32(*v as f32),
@@ -1021,11 +1022,11 @@ pub fn use_score(t: &Template, extra: i32, nested: bool, args: &[Expr]) -> i32 {
 /// Is `e` typed as a pointer/reference to `cls` (or a class derived from it)?
 fn typed_ptr_to(e: &Expr, cls: &str, env: &Env) -> bool {
     let t = ty_of(e, env.vars);
-    let inner = match strip(&t) {
+    let inner = match strip_cv(&t) {
         Type::Ptr(x) | Type::Ref(x) => x.clone(),
         _ => return false,
     };
-    class_name(&inner, env.db).map_or(false, |c| is_base_or_same(env.db, cls, &c))
+    class_name(&inner, env.db).is_some_and(|c| is_base_or_same(env.db, cls, &c))
 }
 
 /// Nesting depth at which an object of `cls` lives at `p + off` (0: the pointee itself).
@@ -1137,10 +1138,10 @@ fn class_at(db: &TypeDb, outer: &str, off: i32, cls: &str, depth: u32) -> bool {
             continue;
         }
         let r = mwdec_lift::types::resolve(Some(db), &f.ty).into_owned();
-        match strip(&r) {
+        match strip_cv(&r) {
             // raw storage of a class template holding its argument (`optional_object<T>`'s
             // `uchar m_data[sizeof(T)]`): the object starts there
-            Type::Array(e, n) if off == fo && mwdec_lift::scalar_size(strip(e)) == Some(1) && template_arg_is(outer, cls) && mwdec_lift::types::size_of(Some(db), &Type::Named(cls.to_string())).is_some_and(|s| s as u64 <= *n as u64) => return true,
+            Type::Array(e, n) if off == fo && mwdec_lift::scalar_size(strip_cv(e)) == Some(1) && template_arg_is(outer, cls) && mwdec_lift::types::size_of(Some(db), &Type::Named(cls.to_string())).is_some_and(|s| s as u64 <= *n as u64) => return true,
             Type::Array(e, n) => {
                 if let (Some(ec), Some(es)) = (class_name(e, db), mwdec_lift::types::size_of(Some(db), e)) {
                     let es = es as i32;
@@ -1194,7 +1195,7 @@ pub fn lvalue_addr(env: &Env, m: &BTreeMap<i32, Expr>, cls: &str) -> Option<Expr
 /// of another object (`MainHeader()`: `*reinterpret_cast<const Header*>(mData.get())`) when the
 /// address itself has another type: that call's address.
 fn ref_object_of(env: &Env, m: &BTreeMap<i32, Expr>, cls: &str, depth: u32) -> Option<Expr> {
-    if std::env::var_os("MWDI_NO_REF_OBJECTS").is_some() {
+    if env_flag!("MWDI_NO_REF_OBJECTS") {
         return None;
     }
     let defs = env.defs;
@@ -1217,7 +1218,7 @@ fn ref_object_of(env: &Env, m: &BTreeMap<i32, Expr>, cls: &str, depth: u32) -> O
     }
     for t in &env.lib.templates {
         let Shape::Scalar(pat) = &t.shape else { continue };
-        if !t.ret_ref || mwdec_lift::pointee(strip(&t.sig.ret)).and_then(|x| class_name(x, env.db)).as_deref().map(mwdec_lift::sig::norm_name) != Some(mwdec_lift::sig::norm_name(cls)) {
+        if !t.ret_ref || mwdec_lift::pointee(strip_cv(&t.sig.ret)).and_then(|x| class_name(x, env.db)).as_deref().map(mwdec_lift::sig::norm_name) != Some(mwdec_lift::sig::norm_name(cls)) {
             continue;
         }
         // (the reference is the address value itself, not a member of another object of `cls`)
@@ -1278,14 +1279,14 @@ fn const_object(a: &Expr, env: &Env) -> bool {
         match e {
             Expr::AddrOf(x) => e = x,
             Expr::Member { base, .. } | Expr::Load { base, .. } => {
-                if let Some(Type::Const(_)) = mwdec_lift::pointee(&ty_of(base, env.vars)).map(|t| t.clone()) {
+                if let Some(Type::Const(_)) = mwdec_lift::pointee(&ty_of(base, env.vars)).cloned() {
                     return true;
                 }
                 e = base;
             }
             Expr::Cast { e: x, .. } => e = x,
             Expr::Var(v) => {
-                return match strip(&env.vars[*v].ty) {
+                return match strip_cv(&env.vars[*v].ty) {
                     Type::Ptr(x) | Type::Ref(x) => matches!(&**x, Type::Const(_)),
                     _ => false,
                 };
@@ -1296,7 +1297,7 @@ fn const_object(a: &Expr, env: &Env) -> bool {
 }
 
 pub fn explain_object(env: &Env, cls: &str, m: &BTreeMap<i32, Expr>, depth: u32) -> Option<(Expr, i32)> {
-    if std::env::var("MWDI_TRACE_SOLVE").is_ok() {
+    if env_flag!("MWDI_TRACE_SOLVE") {
         eprintln!("EXPLAIN {cls} {:?} {m:?}", env.objects.get(&mwdec_lift::sig::norm_name(cls)).map(|l| l.iter().map(|i| env.lib.templates[*i].name.clone()).collect::<Vec<_>>()));
     }
     let list = env.objects.get(&mwdec_lift::sig::norm_name(cls))?;
@@ -1322,12 +1323,12 @@ pub fn explain_object(env: &Env, cls: &str, m: &BTreeMap<i32, Expr>, depth: u32)
         // a template that hands one object hole's components back unchanged explains nothing
         // (`DepthCompareUpdate(false, false)` specialised to a copy): its nested explanation
         // would be the same object again
-        if std::env::var("MWDI_NO_IDENTITY_GUARD").is_err() && mm.b.iter().any(|b| matches!(b, Some(Bind::Comps(c)) if c.len() == m.len() && c.iter().all(|(o, v)| m.get(o).is_some_and(|w| teq(v, w, env.defs))))) {
+        if !env_flag!("MWDI_NO_IDENTITY_GUARD") && mm.b.iter().any(|b| matches!(b, Some(Bind::Comps(c)) if c.len() == m.len() && c.iter().all(|(o, v)| m.get(o).is_some_and(|w| teq(v, w, env.defs))))) {
             continue;
         }
         if let Some((args, extra)) = mm.finalize(depth) {
             let sc = use_score(t, extra, true, &args);
-            if best.as_ref().map_or(true, |(_, b)| sc > *b) {
+            if best.as_ref().is_none_or(|(_, b)| sc > *b) {
                 best = Some((make_call(t, args), sc));
             }
         }
@@ -1354,30 +1355,6 @@ pub fn make_call(t: &Template, mut args: Vec<Expr>) -> Expr {
 }
 
 // ---------------------------------------------------------------- the pass
-
-fn count_defs(body: &[Stmt], n: &mut HashMap<VarId, usize>) {
-    for s in body {
-        match s {
-            Stmt::Assign { dst: Expr::Var(v), .. } => *n.entry(*v).or_default() += 1,
-            Stmt::If { then, els, .. } => {
-                count_defs(then, n);
-                count_defs(els, n);
-            }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => count_defs(body, n),
-            Stmt::For { init, step, body, .. } => {
-                count_defs(init, n);
-                count_defs(step, n);
-                count_defs(body, n);
-            }
-            Stmt::Switch { cases, .. } => {
-                for c in cases {
-                    count_defs(&c.body, n);
-                }
-            }
-            _ => {}
-        }
-    }
-}
 
 fn collect_defs(body: &[Stmt], n: &HashMap<VarId, usize>, vars: &[Var], out: &mut Defs) {
     for s in body {
@@ -1409,7 +1386,7 @@ fn collect_defs(body: &[Stmt], n: &HashMap<VarId, usize>, vars: &[Var], out: &mu
 
 pub fn build_defs(body: &[Stmt], vars: &[Var]) -> Defs {
     let mut n = HashMap::new();
-    count_defs(body, &mut n);
+    mwdec_lift::inline::count_defs(body, &mut n);
     let mut d = Defs::new();
     collect_defs(body, &n, vars, &mut d);
     d
@@ -1461,7 +1438,7 @@ pub fn index(lib: &InlineLib) -> Index {
         let op_name = mwdec_lift::sig::split_scope(&t.name).1.starts_with("operator");
         if let (Shape::Scalar(p), CallKind::Method, 1, false) = (&t.shape, &t.kind, t.holes.len(), op_name) {
             // (a by-value class return is matched with its dead copy stores elsewhere)
-            if matches!(p, Expr::AddrOf(_)) && t.dead.is_empty() && matches!(strip(&t.sig.ret), Type::Ref(_) | Type::Ptr(_)) {
+            if matches!(p, Expr::AddrOf(_)) && t.dead.is_empty() && matches!(strip_cv(&t.sig.ret), Type::Ref(_) | Type::Ptr(_)) {
                 if let Some((0, k)) = pat_canon(p, &t.holes) {
                     member_refs.push((i, k));
                 }
@@ -1472,7 +1449,7 @@ pub fn index(lib: &InlineLib) -> Index {
         if let (Shape::Scalar(p), CallKind::Method, false) = (&t.shape, &t.kind, op_name) {
             let tags = t.holes.len() > 1 && t.holes[1..].iter().enumerate().all(|(k, h)| matches!(h, HoleKind::Scalar(_)) && !p.uses_var(k + 1));
             let reinterp = matches!(p, Expr::Var(0)) && ref_pointee_class(t).is_some_and(|c| t.class.as_deref().is_some_and(|tc| mwdec_lift::sig::norm_name(tc) != mwdec_lift::sig::norm_name(&c)));
-            if (tags || (t.holes.len() == 1 && reinterp)) && (matches!(p, Expr::AddrOf(_)) || reinterp) && t.dead.is_empty() && std::env::var_os("MWDI_TAGGED_REFS").is_some() {
+            if (tags || (t.holes.len() == 1 && reinterp)) && (matches!(p, Expr::AddrOf(_)) || reinterp) && t.dead.is_empty() && env_flag!("MWDI_TAGGED_REFS") {
                 if let Some((0, k)) = pat_canon(p, &t.holes) {
                     member_refs.push((i, k));
                 }
@@ -1480,18 +1457,18 @@ pub fn index(lib: &InlineLib) -> Index {
         }
         if let (Shape::Scalar(p), CallKind::Method, 1, false) = (&t.shape, &t.kind, t.holes.len(), op_name) {
             // (a scalar result: by-value class returns are object templates)
-            let mut scalar_ret = !matches!(strip(&t.sig.ret), Type::Named(_)) && mwdec_lift::scalar_size(strip(&t.sig.ret)).is_some();
+            let mut scalar_ret = !matches!(strip_cv(&t.sig.ret), Type::Named(_)) && mwdec_lift::scalar_size(strip_cv(&t.sig.ret)).is_some();
             // (through a conversion to the declared return type: `EType GetType() const { return
             // static_cast<EType>(mType); }`)
             let p = match p {
-                Expr::Cast { e, ty } if std::env::var("MWDI_NO_CAST_READS").is_err() && strip(ty) == strip(&t.sig.ret) && matches!(&**e, Expr::Load { .. } | Expr::Member { .. }) => {
+                Expr::Cast { e, ty } if !env_flag!("MWDI_NO_CAST_READS") && strip_cv(ty) == strip_cv(&t.sig.ret) && matches!(&**e, Expr::Load { .. } | Expr::Member { .. }) => {
                     scalar_ret = true;
                     &**e
                 }
                 p => p,
             };
             // (an enum result too: checked against the TypeDb where the template is used)
-            let named_ret = matches!(strip(&t.sig.ret), Type::Named(_)) && std::env::var("MWDI_NO_CAST_READS").is_err();
+            let named_ret = matches!(strip_cv(&t.sig.ret), Type::Named(_)) && !env_flag!("MWDI_NO_CAST_READS");
             if !t.ret_ref && t.dead.is_empty() && (scalar_ret || named_ret) {
                 if let Some((0, k, ty)) = comp_of(p, &t.holes) {
                     member_reads.push((i, k, ty.clone()));
@@ -1506,8 +1483,8 @@ pub fn index(lib: &InlineLib) -> Index {
                 // (a plain read only with the dead stores of a by-value class to tell it apart)
                 // (a converted call result, `(float)atan2((double)y, (double)x)`, is specific: the
                 // library forwarders of math.h; an element read `(&mX)[i]` too)
-                let conv_call = matches!(p, Expr::Cast { e, .. } if matches!(&**e, Expr::Call { .. }) || (t.ops >= 1 && !matches!(&**e, Expr::Var(_) | Expr::Load { .. } | Expr::Member { .. } | Expr::Cast { .. }))) && std::env::var("MWDI_NO_CONVCALL").is_err();
-                let elem = matches!(p, Expr::Index { .. }) && std::env::var("MWDI_NO_ELEMREAD").is_err();
+                let conv_call = matches!(p, Expr::Cast { e, .. } if matches!(&**e, Expr::Call { .. }) || (t.ops >= 1 && !matches!(&**e, Expr::Var(_) | Expr::Load { .. } | Expr::Member { .. } | Expr::Cast { .. }))) && !env_flag!("MWDI_NO_CONVCALL");
+                let elem = matches!(p, Expr::Index { .. }) && !env_flag!("MWDI_NO_ELEMREAD");
                 if (t.ops >= 1 && !matches!(p, Expr::Var(_) | Expr::Load { .. } | Expr::Member { .. } | Expr::AddrOf(_) | Expr::Cast { .. })) || !t.dead.is_empty() || conv_call || elem {
                     scalars.push(i);
                     if crate::cflow::has_cflow(p) {
@@ -1585,7 +1562,7 @@ pub fn apply(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
     // bodies that convert through them (`CColor::WithAlphaOf`: `(mRgba & ~0xff) | ToUint8(a *
     // 255.f)`) see the conversion, so for matching they are opened into a tagged cast, and the
     // ones no fold consumed become the call again
-    let fast = std::env::var("MWDI_NO_FASTCAST_OPEN").is_err();
+    let fast = !env_flag!("MWDI_NO_FASTCAST_OPEN");
     if fast {
         open_fast_casts(&mut ir.body);
     }
@@ -1604,7 +1581,7 @@ pub fn apply(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
 /// value of such a temp is pure, so it can be looked through like any expression (`t =
 /// fabs(x); ... (float)t` is `fabsf(x)`) and dropped when dead.
 pub fn only_inline_calls(e: &Expr) -> bool {
-    if std::env::var("MWDI_NO_PURE_CALL_DEFS").is_ok() {
+    if env_flag!("MWDI_NO_PURE_CALL_DEFS") {
         return !e.has_call();
     }
     let mut ok = true;
@@ -1637,7 +1614,7 @@ pub fn member_accessible(db: &TypeDb, owner: &str, field: &str) -> bool {
         let short = mwdec_lift::sig::split_scope(&fname).1.to_string();
         fr.is_some_and(|fr| fr.iter().any(|f| own.as_deref().is_some_and(|o| norm(o) == norm(f) || last(o) == last(f)) || (own.is_none() && (short == *f || fname == *f))))
     };
-    let access = mwdec_lift::sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == field)).map(|f| f.access.clone());
+    let access = mwdec_lift::sig::find_class(db, owner).and_then(|c| c.fields.iter().find(|f| f.name == field)).map(|f| f.access);
     match access {
         Some(mwdec_core::Access::Public) | None => true,
         Some(mwdec_core::Access::Protected) => befriended() || own.as_deref().is_some_and(|o| is_base_or_same_any(db, owner, o)),
@@ -1647,8 +1624,8 @@ pub fn member_accessible(db: &TypeDb, owner: &str, field: &str) -> bool {
 
 /// Class a reference/pointer-returning template returns (`const CVector3f&` -> CVector3f).
 fn ref_pointee_class(t: &Template) -> Option<String> {
-    match strip(&t.sig.ret) {
-        Type::Ref(x) | Type::Ptr(x) => match strip(x) {
+    match strip_cv(&t.sig.ret) {
+        Type::Ref(x) | Type::Ptr(x) => match strip_cv(x) {
             Type::Named(n) => Some(n.clone()),
             _ => None,
         },
@@ -1661,8 +1638,8 @@ fn tag_defaults(t: &Template) -> Vec<Expr> {
     t.holes[1..]
         .iter()
         .map(|h| match h {
-            HoleKind::Scalar(ty) => match strip(ty) {
-                Type::Named(_) => Expr::Cast { ty: strip(ty).clone(), e: Box::new(Expr::Int { value: 0, ty: Type::Int { size: 4, signed: true } }) },
+            HoleKind::Scalar(ty) => match strip_cv(ty) {
+                Type::Named(_) => Expr::Cast { ty: strip_cv(ty).clone(), e: Box::new(Expr::Int { value: 0, ty: Type::Int { size: 4, signed: true } }) },
                 Type::Float { size: 4 } => Expr::Float { bits: 0, double: false },
                 t => Expr::Int { value: 0, ty: t.clone() },
             },
@@ -1739,7 +1716,7 @@ pub fn accessors(db: &TypeDb) -> std::rc::Rc<Vec<Accessor>> {
         return v;
     }
     let mut out = vec![];
-    let ident = |s: &str| s.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let ident = |s: &str| s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && s.chars().all(|c| c.is_alphanumeric() || c == '_');
     for (key, ds) in &db.decls {
         let qname = crate::probe::norm_op_name(key);
         let (scope, last) = mwdec_lift::sig::split_scope(&qname);
@@ -1786,14 +1763,14 @@ pub fn accessors(db: &TypeDb) -> std::rc::Rc<Vec<Accessor>> {
                     }
                 }
             }
-            if !ok || matches!(strip(&ty), Type::Ref(_)) || (deref && !matches!(strip(&ty), Type::Ptr(_))) {
+            if !ok || matches!(strip_cv(&ty), Type::Ref(_)) || (deref && !matches!(strip_cv(&ty), Type::Ptr(_))) {
                 continue;
             }
-            let how = match (strip(&d.ret), amp) {
+            let how = match (strip_cv(&d.ret), amp) {
                 (Type::Ref(_), false) if deref => 3,
                 (Type::Ref(_), false) => 1,
                 (Type::Ptr(_), true) => 2,
-                (r, false) if mwdec_lift::scalar_size(strip(&mwdec_lift::types::resolve(Some(db), r).into_owned())).is_some() || mwdec_lift::types::is_enum(Some(db), r) => 0,
+                (r, false) if mwdec_lift::scalar_size(strip_cv(&mwdec_lift::types::resolve(Some(db), r))).is_some() || mwdec_lift::types::is_enum(Some(db), r) => 0,
                 // an object member returned by value (`CCharAnimTime GetDuration() const`)
                 (r, false) if class_name(r, db).is_some() && class_name(r, db) == class_name(&ty, db) => 4,
                 _ => continue,
@@ -1810,7 +1787,7 @@ pub fn accessors(db: &TypeDb) -> std::rc::Rc<Vec<Accessor>> {
                 variadic: false,
                 runs_code: false,
             };
-            if std::env::var("MWDI_TRACE_ACC").is_ok_and(|f| sig.qualified_name.contains(f.as_str())) {
+            if env_value!("MWDI_TRACE_ACC").is_some_and(|f| sig.qualified_name.contains(f)) {
                 eprintln!("ACC {} how {how} off {off:#x} ty {ty:?} ret {:?} key {key} body {body}", sig.qualified_name, d.ret);
             }
             out.push(Accessor { sig, class: class.clone(), off, ty, how, fields });
@@ -1863,15 +1840,15 @@ fn accessor_stmts(b: &mut [Stmt], env: &Env, idx: &Index) -> usize {
 
 fn accessor_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
     // (then the accessor's own object: `bc.GetOwner().GetModelData()`)
-    if std::env::var("MWDI_NO_MEMBER_REFS").is_err() {
+    if !env_flag!("MWDI_NO_MEMBER_REFS") {
         if let Some(call) = member_ref_call(e, env, idx) {
-            if std::env::var("MWDI_TRACE_ACC").is_ok() {
+            if env_flag!("MWDI_TRACE_ACC") {
                 eprintln!("MREF {e:?} -> {call:?}");
             }
             return 1 + name_inside(e, call, env, idx);
         }
     }
-    if std::env::var("MWDI_NO_MEMBER_READS").is_err() {
+    if !env_flag!("MWDI_NO_MEMBER_READS") {
         if let Some(call) = member_read_call(e, env, idx) {
             return 1 + name_inside(e, call, env, idx);
         }
@@ -1879,7 +1856,7 @@ fn accessor_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
     // an object lvalue the function can't name (passed by reference / copied): the accessor
     // returning a reference to it
     if let Expr::Load { ty, .. } | Expr::Member { ty, .. } = &*e {
-        if class_name(ty, env.db).is_some() && std::env::var_os("MWDI_TAGGED_REFS").is_some() {
+        if class_name(ty, env.db).is_some() && env_flag!("MWDI_TAGGED_REFS") {
             if let Some(Expr::AddrOf(c)) = member_ref_call(&Expr::AddrOf(Box::new(e.clone())), env, idx) {
                 note_named(&c);
                 *e = *c;
@@ -1916,7 +1893,7 @@ fn accessor_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
                 // given a `CTransform4f*`): the object's accessor returning that class
                 // (`xf.GetRow(kDX)` = `*reinterpret_cast<const CVector3f*>(&m00)`)
                 if let Some(pt) = params.get(i) {
-                    if let (Type::Ref(x) | Type::Ptr(x), true) = (strip(pt), std::env::var_os("MWDI_TAGGED_REFS").is_some()) {
+                    if let (Type::Ref(x) | Type::Ptr(x), true) = (strip_cv(pt), env_flag!("MWDI_TAGGED_REFS")) {
                         if class_name(x, env.db).is_some() && matches!(vclass(&ty_of(a, env.vars), env.db), 2) {
                             let cast = Expr::Cast { ty: Type::Ptr(x.clone()), e: Box::new(a.clone()) };
                             if let Some(Expr::AddrOf(c)) = member_ref_call(&cast, env, idx) {
@@ -2046,7 +2023,7 @@ fn name_inside(e: &mut Expr, call: Expr, env: &Env, idx: &Index) -> usize {
 /// through a by-value accessor's temporary (`T v = info.GetDuration();`, the temporary's other
 /// words forwarded), so the source called it. The accessor of the innermost object owning `m`.
 fn byvalue_accessor_copies(ir: &mut IrFunction, db: &TypeDb, lib: &InlineLib, idx: &Index) -> usize {
-    if std::env::var_os("MWDI_NO_BYVALUE_COPIES").is_some() || ir.dead_stores.is_empty() {
+    if env_flag!("MWDI_NO_BYVALUE_COPIES") || ir.dead_stores.is_empty() {
         return 0;
     }
     let defs = build_defs(&ir.body, &ir.vars);
@@ -2077,7 +2054,7 @@ fn byvalue_accessor_copies(ir: &mut IrFunction, db: &TypeDb, lib: &InlineLib, id
             }
             let Some(addr) = object_as_written(src, &b, o - a.off, &a.class, &env) else { continue };
             // (the innermost owner: the smallest member offset)
-            if best.as_ref().map_or(true, |(bo, _, _)| a.off < *bo) {
+            if best.as_ref().is_none_or(|(bo, _, _)| a.off < *bo) {
                 best = Some((a.off, ai, addr));
             }
         }
@@ -2115,13 +2092,13 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
     // member)
     // (or an object pointer reinterpreted as another class: `(const CVector3f*)xf`)
     let cast_to: Option<String> = match e {
-        Expr::Cast { ty: Type::Ptr(x), e: inner } if std::env::var_os("MWDI_TAGGED_REFS").is_some() => {
+        Expr::Cast { ty: Type::Ptr(x), e: inner } if env_flag!("MWDI_TAGGED_REFS") => {
             let to = class_name(x, env.db);
             let from = mwdec_lift::pointee(&ty_of(inner, env.vars)).and_then(|t| class_name(t, env.db));
             to.filter(|t| from.is_some_and(|f| mwdec_lift::sig::norm_name(&f) != mwdec_lift::sig::norm_name(t)))
         }
         // `*(const T*)p` read as an object at the start of another class's object
-        Expr::AddrOf(x) if std::env::var_os("MWDI_TAGGED_REFS").is_some() => match &**x {
+        Expr::AddrOf(x) if env_flag!("MWDI_TAGGED_REFS") => match &**x {
             Expr::Load { base, offset: 0, ty } => {
                 let to = class_name(ty, env.db);
                 let from = mwdec_lift::pointee(&ty_of(base, env.vars)).and_then(|t| class_name(t, env.db));
@@ -2131,7 +2108,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         },
         _ => None,
     };
-    if std::env::var("MWDI_TRACE_ACC").is_ok() && matches!(e, Expr::Cast { .. } | Expr::AddrOf(_)) {
+    if env_flag!("MWDI_TRACE_ACC") && matches!(e, Expr::Cast { .. } | Expr::AddrOf(_)) {
         eprintln!("MREF cast {e:?} -> {cast_to:?}");
     }
     let explicit = cast_to.is_some()
@@ -2147,7 +2124,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
     // the object the address is used as (`Dot(v, plane.mNormal)` wants a CVector3f): an accessor
     // returning another class (a derived `const CUnitVector3f&`) would need a cast
     let want = mwdec_lift::pointee(&ty_of(e, env.vars)).and_then(|t| class_name(t, env.db));
-    let fits = |ret: &Type| match (&want, mwdec_lift::pointee(strip(ret)).and_then(|t| class_name(t, env.db))) {
+    let fits = |ret: &Type| match (&want, mwdec_lift::pointee(strip_cv(ret)).and_then(|t| class_name(t, env.db))) {
         (Some(w), Some(r)) => mwdec_lift::sig::norm_name(w) == mwdec_lift::sig::norm_name(&r),
         _ => true,
     };
@@ -2165,7 +2142,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         }
         // reinterpreted: the accessor must return that class
         if let Some(to) = &cast_to {
-            if !ref_pointee_class(t).is_some_and(|c| mwdec_lift::sig::norm_name(&c) == mwdec_lift::sig::norm_name(to)) {
+            if ref_pointee_class(t).is_none_or(|c| mwdec_lift::sig::norm_name(&c) != mwdec_lift::sig::norm_name(to)) {
                 continue;
             }
         } else if matches!(t.shape, Shape::Scalar(Expr::Var(_))) {
@@ -2174,7 +2151,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         if k == 0 && cast_to.is_none() {
             // the object's own address: only through an explicit member lvalue of another type
             let Expr::AddrOf(x) = e else { continue };
-            if class_name(&ty_of(x, env.vars), env.db).map_or(true, |c| is_base_or_same(env.db, class, &c)) {
+            if class_name(&ty_of(x, env.vars), env.db).is_none_or(|c| is_base_or_same(env.db, class, &c)) {
                 continue;
             }
         }
@@ -2228,7 +2205,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         }
         if a.off == 0 {
             let Expr::AddrOf(x) = e else { continue };
-            if class_name(&ty_of(x, env.vars), env.db).map_or(true, |c| is_base_or_same(env.db, &a.class, &c)) {
+            if class_name(&ty_of(x, env.vars), env.db).is_none_or(|c| is_base_or_same(env.db, &a.class, &c)) {
                 continue;
             }
         }
@@ -2258,7 +2235,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
     if best.is_none() || best_d.is_some() {
         if let Some((_, _, ai, addr)) = best_d {
             let a = &accs[ai];
-            let ret = match (a.how, strip(&a.sig.ret)) {
+            let ret = match (a.how, strip_cv(&a.sig.ret)) {
                 (1, Type::Ref(inner)) => (**inner).clone(),
                 _ => a.sig.ret.clone(),
             };
@@ -2272,7 +2249,7 @@ fn member_ref_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
     args.extend(tag_defaults(t));
     let mut call = make_call(t, args);
     if t.ret_ref {
-        if let (Expr::Call { ret, .. }, Type::Ref(inner)) = (&mut call, strip(&t.sig.ret)) {
+        if let (Expr::Call { ret, .. }, Type::Ref(inner)) = (&mut call, strip_cv(&t.sig.ret)) {
             *ret = (**inner).clone();
         }
         return Some(Expr::AddrOf(Box::new(call)));
@@ -2287,18 +2264,18 @@ fn member_read_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         Expr::Load { ty, .. } | Expr::Member { ty, .. } => ty.clone(),
         _ => return None,
     };
-    let esize = mwdec_lift::scalar_size(strip(&ety))?;
+    let esize = mwdec_lift::scalar_size(strip_cv(&ety))?;
     let (b, o) = crate::addr::access(e, env)?;
     let mut best: Option<(u8, String, usize, Expr)> = None;
     for (ti, k, ty) in &idx.member_reads {
         let t = &env.lib.templates[*ti];
-        if matches!(strip(&t.sig.ret), Type::Named(_)) && !mwdec_lift::types::is_enum(Some(env.db), strip(&t.sig.ret)) {
+        if matches!(strip_cv(&t.sig.ret), Type::Named(_)) && !mwdec_lift::types::is_enum(Some(env.db), strip_cv(&t.sig.ret)) {
             continue;
         }
         if *k != o && o < *k {
             continue;
         }
-        if mwdec_lift::scalar_size(strip(ty)) != Some(esize) || vclass(ty, env.db) != vclass(&ety, env.db) {
+        if mwdec_lift::scalar_size(strip_cv(ty)) != Some(esize) || vclass(ty, env.db) != vclass(&ety, env.db) {
             continue;
         }
         let HoleKind::Obj { class, .. } = &t.holes[0] else { continue };
@@ -2340,8 +2317,8 @@ fn member_read_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         if !matches!(a.how, 0 | 3) || o < a.off {
             continue;
         }
-        let rt = mwdec_lift::types::resolve(Some(env.db), strip(&a.ty)).into_owned();
-        if mwdec_lift::scalar_size(strip(&rt)).or_else(|| mwdec_lift::types::is_enum(Some(env.db), &rt).then_some(4)) != Some(esize) || vclass(&a.ty, env.db) != vclass(&ety, env.db) {
+        let rt = mwdec_lift::types::resolve(Some(env.db), strip_cv(&a.ty)).into_owned();
+        if mwdec_lift::scalar_size(strip_cv(&rt)).or_else(|| mwdec_lift::types::is_enum(Some(env.db), &rt).then_some(4)) != Some(esize) || vclass(&a.ty, env.db) != vclass(&ety, env.db) {
             continue;
         }
         let Some(addr) = object_as_written(e, &b, o - a.off, &a.class, env) else { continue };
@@ -2357,7 +2334,7 @@ fn member_read_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         }
         let name = mwdec_lift::sig::split_scope(&a.sig.qualified_name).1.to_string();
         let rank = a.fields.len() as u8 * 16 + acc_rank(&name, a.sig.is_const);
-        if best_d.as_ref().map_or(true, |(r, bn, _, _)| rank < *r || (rank == *r && name < *bn)) {
+        if best_d.as_ref().is_none_or(|(r, bn, _, _)| rank < *r || (rank == *r && name < *bn)) {
             best_d = Some((rank, name, ai, addr));
         }
     }
@@ -2366,7 +2343,7 @@ fn member_read_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         (Some(_), None) => true,
         _ => false,
     };
-    if std::env::var("MWDI_TRACE_ACC").is_ok() {
+    if env_flag!("MWDI_TRACE_ACC") {
         eprintln!("MREAD {e:?} -> t {:?} d {:?}", best.as_ref().map(|b| env.lib.templates[b.2].name.clone()), best_d.as_ref().map(|b| accs[b.2].sig.qualified_name.clone()));
     }
     if use_t {
@@ -2377,7 +2354,7 @@ fn member_read_call(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
     let a = &accs[ai];
     if a.how == 3 {
         // the pointer value is the address of the returned reference's object
-        let Type::Ref(inner) = strip(&a.sig.ret) else { return None };
+        let Type::Ref(inner) = strip_cv(&a.sig.ret) else { return None };
         let call = Expr::Call { callee: Callee::Method { symbol: String::new(), sig: a.sig.clone(), this: Box::new(addr), qualified: false }, args: vec![], ret: (**inner).clone() };
         return Some(Expr::AddrOf(Box::new(call)));
     }
@@ -2415,7 +2392,7 @@ fn restore_fast_casts(ir: &mut IrFunction, db: &TypeDb) {
     let mut restore = |e: &mut Expr| {
         let Expr::Cast { ty: Type::Volatile(qt), e: x } = e else { return };
         let call = |sym: &str, arg: Expr, ret: Type| Expr::Call { callee: Callee::Direct { symbol: sym.to_string(), sig: mwdec_lift::sig::sig_of(sym, Some(db)) }, args: vec![arg], ret };
-        let store = match strip(qt) {
+        let store = match strip_cv(qt) {
             Type::Int { size: 1, signed: false } => Some(0),
             Type::Int { size: 2, signed: false } => Some(1),
             Type::Int { size: 1, signed: true } => Some(2),
@@ -2426,7 +2403,7 @@ fn restore_fast_casts(ir: &mut IrFunction, db: &TypeDb) {
             *e = call(FAST_CASTS[k].1, (**x).clone(), (**qt).clone());
             return;
         }
-        let load = match strip(&ty_of(x, &vars)) {
+        let load = match strip_cv(&ty_of(x, &vars)) {
             Type::Int { size: 1, signed: false } => Some(0),
             Type::Int { size: 2, signed: true } => Some(1),
             _ => None,
@@ -2481,11 +2458,11 @@ fn literal_value(e: &Expr, t: &Type, db: &TypeDb) -> Option<Expr> {
         _ => return None,
     };
     let b = LITERALS.with(|l| l.borrow().get(sym).cloned())?;
-    let r = mwdec_lift::types::resolve(Some(db), strip(t)).into_owned();
-    match (strip(&r), b.len()) {
+    let r = mwdec_lift::types::resolve(Some(db), strip_cv(t)).into_owned();
+    match (strip_cv(&r), b.len()) {
         (Type::Float { size: 4 }, 4) => Some(Expr::Float { bits: u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64, double: false }),
         (Type::Float { size: 8 }, 8) => Some(Expr::Float { bits: u64::from_be_bytes(b[..8].try_into().ok()?), double: true }),
-        (Type::Int { size: 4, .. } | Type::Long { .. } | Type::Named(_), 4) => Some(Expr::Int { value: i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64, ty: strip(t).clone() }),
+        (Type::Int { size: 4, .. } | Type::Long { .. } | Type::Named(_), 4) => Some(Expr::Int { value: i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64, ty: strip_cv(t).clone() }),
         _ => None,
     }
 }
@@ -2498,7 +2475,7 @@ thread_local! {
 fn apply_inner(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
     crate::groups::set_in_ctor(ir.symbol.starts_with("__ct__"));
     // members' own constructors' stores at the start of a constructor body are implicit
-    let (stripped, pending) = if std::env::var("MWDI_NO_CTORS").is_ok() { (0, Default::default()) } else { crate::defctor::strip(ir, db, &lib.default_ctors) };
+    let (stripped, pending) = if env_flag!("MWDI_NO_CTORS") { (0, Default::default()) } else { crate::defctor::strip(ir, db, &lib.default_ctors) };
     let stripped = stripped + crate::defctor::copy_ctor_inits(ir, db, &lib.copy_ctors);
     // `if (dst) <copy construction>`: `new (dst) T(src)`
     let stripped = stripped + crate::defctor::placement_copies(ir, db, &lib.copy_ctors);
@@ -2509,20 +2486,20 @@ fn apply_inner(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
     // the returned object built as a default construction: `return T();`
     let stripped = stripped + crate::defctor::default_returns(ir, db, &lib.default_ctors);
     // list loops, before folding can merge the walking pointer with its first value
-    let stash = if std::env::var("MWDI_NO_ITERLOOPS").is_err() { crate::iterloops::lists_prefold(ir, db) } else { vec![] };
+    let stash = if !env_flag!("MWDI_NO_ITERLOOPS") { crate::iterloops::lists_prefold(ir, db) } else { vec![] };
     let stripped = stripped + stash.len();
     if lib.templates.is_empty() {
         crate::iterloops::unstash(ir, stash);
         return stripped + crate::defctor::finish(ir, db, &pending);
     }
     let idx = index(lib);
-    let mut total = stripped + if std::env::var("MWDI_NO_CTORS").is_ok() { 0 } else { crate::ctors::strip_member_ctor_stores(ir, db) };
+    let mut total = stripped + if env_flag!("MWDI_NO_CTORS") { 0 } else { crate::ctors::strip_member_ctor_stores(ir, db) };
     // stack slots typed only by size that are objects passed to calls
-    if std::env::var("MWDI_NO_BUFFERS").is_err() {
+    if !env_flag!("MWDI_NO_BUFFERS") {
         total += crate::buffers::type_object_slots(ir, db);
     }
     total += crate::util::prof::time(0, || crate::objlocals::group(ir, lib, &idx, db));
-    if std::env::var("MWDI_DUMP_IR").is_ok_and(|f| ir.symbol.contains(f.as_str())) {
+    if env_value!("MWDI_DUMP_IR").is_some_and(|f| ir.symbol.contains(f)) {
         for st in &ir.body {
             eprintln!("IR {st:?}");
         }
@@ -2565,7 +2542,7 @@ fn apply_inner(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb) -> usize {
     }
     crate::iterloops::unstash(ir, stash);
     // loops over pointer-iterated containers, as iterator loops
-    if std::env::var("MWDI_NO_ITERLOOPS").is_err() {
+    if !env_flag!("MWDI_NO_ITERLOOPS") {
         total += crate::iterloops::apply(ir, db);
     }
     // container forwarders and negated predicates (`stmtinl`)
@@ -2654,7 +2631,7 @@ pub fn drop_write_only_stack(body: &mut Vec<Stmt>, vars: &[Var]) {
     count(body, vars, &mut stores);
     let dead: Vec<VarId> = stores
         .iter()
-        .filter(|(v, n)| mentions.get(v) == Some(n) && matches!(strip(&vars[**v].ty), Type::Float { .. } | Type::Int { .. }))
+        .filter(|(v, n)| mentions.get(v) == Some(n) && matches!(strip_cv(&vars[**v].ty), Type::Float { .. } | Type::Int { .. }))
         .map(|(v, _)| *v)
         .collect();
     if dead.is_empty() {
@@ -2669,7 +2646,7 @@ pub fn drop_write_only_stack(body: &mut Vec<Stmt>, vars: &[Var]) {
 pub fn scalar_shallow(s: &mut Stmt, env: &Env, idx: &Index) -> usize {
     // an object built in place by its (out-of-line) member-wise constructor: the value of an
     // object-valued inline (`CVector2f::Lerp(a, b, t)` returning `CVector2f(x, y)`)
-    if std::env::var("MWDI_NO_CTOR_EXPLAIN").is_err() {
+    if !env_flag!("MWDI_NO_CTOR_EXPLAIN") {
         if let Stmt::Expr(Expr::Call { callee: Callee::Method { sig, this, .. }, args, .. }) = &*s {
             if let (Some(cls), Expr::AddrOf(slot)) = (sig.this_class.as_deref(), &**this) {
                 let (_, last) = mwdec_lift::sig::split_scope(&sig.qualified_name);
@@ -2757,7 +2734,7 @@ fn ctor_members(env: &Env, cls: &str, sig: &mwdec_core::FuncSig, args: &[Expr]) 
         if !matches!(t.kind, CallKind::Ctor) || t.holes.len() != args.len() || t.sig.params.len() != sig.params.len() {
             continue;
         }
-        if t.sig.params.iter().zip(&sig.params).any(|(a, b)| strip(&a.ty) != strip(&b.ty)) {
+        if t.sig.params.iter().zip(&sig.params).any(|(a, b)| strip_cv(&a.ty) != strip_cv(&b.ty)) {
             continue;
         }
         let mut m = BTreeMap::new();
@@ -2781,7 +2758,7 @@ fn ctor_members(env: &Env, cls: &str, sig: &mwdec_core::FuncSig, args: &[Expr]) 
 /// The constructor of `cls` with fewer parameters than `n` explaining the members `m` where
 /// every object parameter is an object the members are read from (an lvalue, not a temporary).
 fn grouped_ctor(env: &Env, cls: &str, m: &BTreeMap<i32, Expr>, n: usize) -> Option<Expr> {
-    if std::env::var_os("MWDI_NO_GROUPED_CTORS").is_some() {
+    if env_flag!("MWDI_NO_GROUPED_CTORS") {
         return None;
     }
     let list = env.objects.get(&mwdec_lift::sig::norm_name(cls))?;
@@ -2898,12 +2875,12 @@ fn scalar_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
                 continue;
             }
             // the inline's result type must be the expression's (no float/double mixups)
-            if let (Type::Float { size: a }, Type::Float { size: b }) = (strip(&t.sig.ret), strip(&ty_of(e, env.vars))) {
+            if let (Type::Float { size: a }, Type::Float { size: b }) = (strip_cv(&t.sig.ret), strip_cv(&ty_of(e, env.vars))) {
                 if a != b {
                     continue;
                 }
             }
-            if best.as_ref().map_or(false, |(_, b)| (t.ops as i32) * 10 + 9 < *b) {
+            if best.as_ref().is_some_and(|(_, b)| (t.ops as i32) * 10 + 9 < *b) {
                 continue;
             }
             let mut m = M::new(env, t);
@@ -2926,7 +2903,7 @@ fn scalar_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
             let mut sc = use_score(t, extra, false, &args);
             // an element read of an object (`v[i]` = `(&v.mX)[i]`): the object binding is the
             // evidence (no operator nodes to count)
-            if matches!(p, Expr::Index { .. }) && t.ops == 0 && std::env::var("MWDI_NO_ELEMREAD").is_err() {
+            if matches!(p, Expr::Index { .. }) && t.ops == 0 && !env_flag!("MWDI_NO_ELEMREAD") {
                 // (a const object only has the const overload)
                 if matches!(t.kind, CallKind::Method) && !t.sig.is_const && args.first().is_some_and(|a| const_object(a, env)) {
                     continue;
@@ -2936,7 +2913,7 @@ fn scalar_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
             if tr {
                 eprintln!("SCALAR {} score {sc}", t.name);
             }
-            if best.as_ref().map_or(true, |(_, b)| sc > *b) {
+            if best.as_ref().is_none_or(|(_, b)| sc > *b) {
                 best = Some((make_call(t, args), sc));
             }
         }
@@ -2948,7 +2925,7 @@ fn scalar_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
                 let (pat, addr) = match e {
                     // the address of a const element (`&cvec[i]` is `const T*`) can't stand where
                     // the lifter typed a plain pointer
-                    Expr::AddrOf(_) if matches!(strip(&t.sig.ret), Type::Ref(inner) if matches!(&**inner, Type::Const(_))) => continue,
+                    Expr::AddrOf(_) if matches!(strip_cv(&t.sig.ret), Type::Ref(inner) if matches!(&**inner, Type::Const(_))) => continue,
                     Expr::AddrOf(_) => (p, true),
                     Expr::Index { .. } => (&**inner, false),
                     _ => continue,
@@ -2978,11 +2955,11 @@ fn scalar_expr(e: &mut Expr, env: &Env, idx: &Index) -> usize {
                 }
                 let mut call = make_call(t, args);
                 // the referenced object itself (an lvalue of the element type)
-                if let (Expr::Call { ret, .. }, Type::Ref(inner)) = (&mut call, strip(&t.sig.ret)) {
+                if let (Expr::Call { ret, .. }, Type::Ref(inner)) = (&mut call, strip_cv(&t.sig.ret)) {
                     *ret = (**inner).clone();
                 }
                 // a scalar read of a class element is its first member (`ids[i].value`)
-                if let (false, Expr::Index { ty: ity, .. }, Type::Ref(inner)) = (addr, &*e, strip(&t.sig.ret)) {
+                if let (false, Expr::Index { ty: ity, .. }, Type::Ref(inner)) = (addr, &*e, strip_cv(&t.sig.ret)) {
                     if class_name(inner, env.db).is_some() && class_name(ity, env.db).is_none() {
                         call = Expr::Member { base: Box::new(call), offset: 0, ty: ity.clone() };
                     }
@@ -3067,7 +3044,7 @@ fn pure_value(src: &Expr) -> bool {
     if !src.has_call() {
         return true;
     }
-    if !only_inline_calls(src) || std::env::var("MWDI_NO_PURE_CALL_DEFS").is_ok() {
+    if !only_inline_calls(src) || env_flag!("MWDI_NO_PURE_CALL_DEFS") {
         return false;
     }
     let mut ok = true;
@@ -3094,7 +3071,7 @@ pub fn dce(body: &mut Vec<Stmt>, vars: &[Var]) {
         });
         // assignment destinations are not reads
         let mut dsts: HashMap<VarId, usize> = HashMap::new();
-        count_defs(body, &mut dsts);
+        mwdec_lift::inline::count_defs(body, &mut dsts);
         let mut changed = false;
         Stmt::for_each_block_mut(body, &mut |b| {
             b.retain(|s| match s {
@@ -3138,7 +3115,7 @@ fn linear(e: &Expr, scale: i64, terms: &mut Vec<(Expr, i64)>, c: &mut i64, defs:
             let Expr::Int { value: k, .. } = **r else { return false };
             linear(l, scale * k, terms, c, defs, depth + 1)
         }
-        Expr::Cast { ty, e: inner } if matches!(strip(ty), Type::Ptr(_) | Type::Int { size: 4, .. }) => linear(inner, scale, terms, c, defs, depth + 1),
+        Expr::Cast { ty, e: inner } if matches!(strip_cv(ty), Type::Ptr(_) | Type::Int { size: 4, .. }) => linear(inner, scale, terms, c, defs, depth + 1),
         Expr::AddrOf(x) => match &**x {
             Expr::Load { base, offset, .. } => {
                 *c += *offset as i64 * scale;
@@ -3190,7 +3167,7 @@ fn linear_index(e: &Expr, scale: i64, terms: &mut Vec<(Expr, i64)>, c: &mut i64,
 /// `p` stepped by `k` bytes: `&p->(k)` of an untyped member, `(T*)(p + k)` with a byte step.
 fn ptr_step(e: &Expr) -> Option<(&Expr, i64)> {
     let e = match e {
-        Expr::Cast { ty, e } if matches!(strip(ty), Type::Ptr(_)) => &**e,
+        Expr::Cast { ty, e } if matches!(strip_cv(ty), Type::Ptr(_)) => &**e,
         e => e,
     };
     match e {
@@ -3212,9 +3189,9 @@ fn ptr_step(e: &Expr) -> Option<(&Expr, i64)> {
 fn same_word<'a>(e: &'a Expr, env: &Env) -> &'a Expr {
     if let Expr::Cast { ty, e: inner } = e {
         let it = ty_of(res(inner, env.defs), env.vars);
-        let size = |t: &Type| match strip(t) {
+        let size = |t: &Type| match strip_cv(t) {
             Type::Int { size, .. } => Some(*size as u32),
-            Type::Unknown { size } => Some(*size as u32),
+            Type::Unknown { size } => Some(*size),
             _ => None,
         };
         if size(ty).is_some() && size(ty) == size(&it) {

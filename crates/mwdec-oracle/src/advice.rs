@@ -194,7 +194,7 @@ fn diagnose(cand: &Candidate, details: Vec<OrderAdvice>) -> OrderDiagnosis {
     let mut d = OrderDiagnosis::default();
     // the line table of inlined header code holds header line numbers: keep moves inside the body
     let body = cand.body_lines();
-    let inside = |l: u32| body.map_or(true, |(a, b)| l > a && l < b);
+    let inside = |l: u32| body.is_none_or(|(a, b)| l > a && l < b);
     let add = |line: Option<u32>, before: Option<u32>, reason: MoveReason, moves: &mut Vec<StatementMove>| -> bool {
         let (Some(line), Some(before)) = (cand.src_line(line), cand.src_line(before)) else { return false };
         if line == before || !inside(line) || !inside(before) {

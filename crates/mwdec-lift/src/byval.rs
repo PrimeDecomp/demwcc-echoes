@@ -20,13 +20,6 @@ fn type_key(db: &TypeDb, t: &Type) -> Option<String> {
     named(&r).map(sig::norm_name)
 }
 
-fn strip_casts(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_casts(e),
-        e => e,
-    }
-}
-
 /// `src` (a scalar read covering all of `t`) as a whole-object lvalue of type `t`.
 pub(crate) fn whole_object(src: &Expr, t: &Type, vars: &[Var], db: &TypeDb) -> Option<Expr> {
     let want = type_key(db, t)?;
@@ -215,7 +208,7 @@ fn pairs_in(b: &[Stmt], vars: &[Var], db: &TypeDb, defs: &HashMap<VarId, Expr>) 
                 Some(l) => l,
                 // a register value loaded as the whole object (the compiler reused the load
                 // for the argument copy): pass that object
-                None if matches!(src, Expr::Var(l) if defs.get(l).and_then(|d| whole_object(d, &t, vars, db)).map_or(false, |x| stable(&x, vars))) => {
+                None if matches!(src, Expr::Var(l) if defs.get(l).and_then(|d| whole_object(d, &t, vars, db)).is_some_and(|x| stable(&x, vars))) => {
                     let Expr::Var(l) = src else { continue };
                     whole_object(&defs[l], &t, vars, db).unwrap()
                 }
@@ -367,7 +360,7 @@ pub fn named_result_copies(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, dead: &mut
     });
     for (w, v, t) in changes {
         // (a frame object mentioned elsewhere is not just the copy)
-        if body.iter().any(|s| crate::idioms::stmt_mentions(s, v)) {
+        if body.iter().any(|s| Stmt::uses_var(s, v)) {
             continue;
         }
         if let VarKind::Stack { size, .. } = &mut vars[v].kind {
@@ -571,7 +564,7 @@ fn member_rewrite(body: &mut Vec<Stmt>, lv: VarId, sty: &Type, t: &Type, db: &Ty
         if let Expr::Call { callee, args, .. } = x {
             let ptys: Vec<Type> = call_params(callee).map(|s| s.params.iter().map(|p| p.ty.clone()).collect()).unwrap_or_default();
             for (n, a) in args.iter_mut().enumerate() {
-                if matches!(a, Expr::Var(y) if *y == lv) && ptys.get(n).map_or(false, |p| is_byval(db, p) && type_key(db, p) == tk) {
+                if matches!(a, Expr::Var(y) if *y == lv) && ptys.get(n).is_some_and(|p| is_byval(db, p) && type_key(db, p) == tk) {
                     *a = Expr::Var(HOLD);
                 }
             }
@@ -653,7 +646,7 @@ pub fn forward_ptmf_args(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
                     match (s, p) {
                         (Some((s, 0)), Some((p, 0))) if matches!(vars[s].kind, VarKind::Stack { .. }) && matches!(vars[p].kind, VarKind::Param { .. }) => {
                             let pt = types::resolve(Some(db), &vars[p].ty).into_owned();
-                            let whole = types::size_of(Some(db), &pt).zip(scalar_size(&types::ty_of(src, vars))).map_or(false, |(a, b)| a == b && a > 0);
+                            let whole = types::size_of(Some(db), &pt).zip(scalar_size(&types::ty_of(src, vars))).is_some_and(|(a, b)| a == b && a > 0);
                             if is_byval(db, &pt) && whole {
                                 Some((s, p))
                             } else {
@@ -738,7 +731,7 @@ fn type_copy_sources(body: &mut Vec<Stmt>, vars: &mut [Var], db: &TypeDb) {
             continue;
         }
         let n = types::size_of(Some(db), &t).unwrap_or(0);
-        let whole = at.as_ref().map_or(true, |a| scalar_size(a) == Some(n));
+        let whole = at.as_ref().is_none_or(|a| scalar_size(a) == Some(n));
         // (a slot only written narrower than the word read back is that word)
         if n > 0 && (n == lsize || (lsize < n && at.is_some())) && whole {
             retype.insert(lv, vars[sv].ty.clone());
@@ -858,7 +851,7 @@ pub fn member_built_args(body: &mut Vec<Stmt>, vars: &[Var], db: &TypeDb) {
                     continue;
                 }
                 // a constructor taking the members in order (scalars and pointers)
-                let base = crate::frameobj::strip_template_args(&cls);
+                let base = crate::sig::strip_tmpl(&cls);
                 let last = sig::split_scope(&base).1.to_string();
                 let fits = db.decls.get(&format!("{base}::{last}")).is_some_and(|ds| {
                     ds.iter().any(|d| {

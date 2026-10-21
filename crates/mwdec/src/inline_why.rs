@@ -23,7 +23,7 @@
 //! | `partial:missing-call` | the accesses match but a call of the template isn't there |
 //!
 //! TRAIN-split diagnostics only; nothing here feeds the draft.
-use crate::search_cmds::{externs_for, unit_inputs, Compilers, UnitInputs};
+use crate::search_cmds::{target_externs_for, unit_inputs, Compilers, UnitInputs};
 use anyhow::{anyhow, Result};
 use mwdec_core::{Function, TypeDb};
 use mwdec_inline::template::{HoleKind, Shape, Template};
@@ -236,11 +236,6 @@ fn root_class(root: &Expr, vars: &[mwdec_lift::Var], db: &TypeDb) -> Option<Stri
     mwdec_lift::named(&r).map(|s| s.to_string())
 }
 
-/// Near matches of the library's templates in `ir` (after folding), best first.
-pub fn diagnose(ir: &mwdec_lift::IrFunction, lib: &mwdec_inline::InlineLib, db: &TypeDb, max: usize) -> Vec<Candidate> {
-    diagnose_only(ir, lib, db, max, None)
-}
-
 /// Last name component of a template (`rstl::vector<T>::push_back` -> `push_back`).
 fn method_name(t: &str) -> &str {
     let mut depth = 0;
@@ -257,7 +252,8 @@ fn method_name(t: &str) -> &str {
     &t[last..]
 }
 
-/// [`diagnose`] restricted to templates whose method name is in `only` (then every template of
+/// Near matches of the library's templates in `ir` (after folding), best first; with `only`,
+/// restricted to templates whose method name is in it (then every template of
 /// those names is reported, however little of it matches: `absent` when nothing does).
 pub fn diagnose_only(ir: &mwdec_lift::IrFunction, lib: &mwdec_inline::InlineLib, db: &TypeDb, max: usize, only: Option<&[String]>) -> Vec<Candidate> {
     let mut fp = Fingerprint::default();
@@ -481,7 +477,7 @@ pub fn cmd_inline_why(root: &Path, work: &Path, unit: Option<String>, symbol: Op
     let mut n = 0;
     for (uname, syms) in by_unit {
         let Some(u) = p.unit(&uname) else { continue };
-        let (t_ext, _) = externs_for(&p, &u.name);
+        let t_ext = target_externs_for(&p, &u.name);
         let ui = match unit_inputs(&p, u, &cc, &t_ext.objects, true, Some(&t_ext)) {
             Ok(ui) => ui,
             Err(e) => {

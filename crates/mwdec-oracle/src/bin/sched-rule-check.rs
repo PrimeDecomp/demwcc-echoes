@@ -5,22 +5,10 @@
 //! (the node the variant prefers issued later in the same cycle, so the unit model accepted it).
 //!
 //! usage: sched-rule-check [N=200] [seed=1] [--show]
+use mwdec_oracle::testgen::Rng;
 use mwdec_oracle::compile::Compiler;
 use mwdec_oracle::sched::RuleEvidence;
 use mwdec_oracle::tracer::{trace_source, TraceOptions};
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-}
 
 const PRELUDE: &str = "struct S { int a, b, c, d; float f, g, h; short s; unsigned char u; };\nint use4(int, int, int, float);\nint g1; float gf;\n";
 
@@ -94,7 +82,7 @@ fn main() -> anyhow::Result<()> {
     let seed: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
     let show = args.iter().any(|a| a == "--show");
     let comp = Compiler::default();
-    let mut r = Rng(0x9E3779B97F4A7C15 ^ seed.wrapping_mul(0x2545F4914F6CDD1D));
+    let mut r = Rng::seeded(seed);
     // [pass][rank]: pass 0 = pre-RA, 1 = post-RA; rank 0 = off, 1 = on
     let mut ev = [[RuleEvidence::default(); 2]; 2];
     let mut traced = 0;

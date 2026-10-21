@@ -27,19 +27,17 @@ pub use fast::FastStats;
 pub use compare::{compare, compare_detailed, compare_indexed, Detailed, DiffClass, ExternIndex, ObjIndex};
 pub use mwcc_compare::strict::PlaceholderProver;
 
-/// Default project root (read-only inputs); override with `MWDEC_ROOT`.
-
-/// Default scratch root; override with `MWDEC_WORK`.
-
 /// Default compiler, relative to the project root.
 pub const DEFAULT_COMPILER: &str = "build/compilers/GC/2.7/mwcceppc.exe";
 /// Bump to invalidate on-disk caches when the cache format/semantics change.
 const CACHE_SALT: &str = "mwdec-mwcc-cache-v2";
 
+/// Default project root (read-only inputs); override with `MWDEC_ROOT`.
 pub fn default_root() -> PathBuf {
-    std::env::var_os("MWDEC_ROOT").map(PathBuf::from).unwrap_or_else(mwdec_core::paths::project_root)
+    mwdec_core::paths::project_root()
 }
 
+/// Default scratch root; override with `MWDEC_WORK`.
 pub fn default_work() -> PathBuf {
     std::env::var_os("MWDEC_WORK").map(PathBuf::from).unwrap_or_else(|| mwdec_core::paths::work_dir("mwdec-mwcc"))
 }
@@ -150,6 +148,11 @@ pub fn win_path(p: &Path) -> String {
     abs.to_string_lossy().replace('/', "\\")
 }
 
+/// The first three lines of compiler `messages`, joined with ` | ` (for one-line reports).
+fn first_lines(messages: &str) -> String {
+    messages.lines().take(3).collect::<Vec<_>>().join(" | ")
+}
+
 // ---------------------------------------------------------------- hashing
 
 /// FNV-1a 128 over length-prefixed parts (stable across runs/toolchains; used for cache keys).
@@ -243,6 +246,11 @@ pub struct UnitContext {
 }
 
 impl UnitContext {
+    /// A whole (not split) context, with the PCH `mch` when it has one.
+    fn new(cflags: &[String], context: &str, mch: Option<PathBuf>, hash: u128) -> UnitContext {
+        UnitContext { cflags: cflags.to_vec(), context: context.to_string(), mch, hash, text: String::new(), excluded: vec![], tu_name: None }
+    }
+
     /// Candidates compiled as the unit's own source file name (`main/Dir/CFoo` ->
     /// `CFoo.cpp`, `.c` for C units).
     pub fn named(mut self, unit: &str) -> UnitContext {
@@ -326,7 +334,6 @@ pub struct Mwcc {
     pool: Arc<Pool>,
     /// Persistent-compiler fast path for candidate compiles (`enable_fast`): mwcc-wasm's pool.
     fast: std::sync::RwLock<Option<Arc<fast::FastPool>>>,
-    counter: AtomicU64,
     mem_cache: Mutex<MemCache>,
     pch_locks: Mutex<HashMap<u128, Arc<Mutex<()>>>>,
     /// Split PCH replacements per context hash (`split`), established on the first crash.
@@ -347,16 +354,10 @@ impl Mwcc {
             timeout: Duration::from_secs(120),
             pool: Arc::new(Pool::new(jobs)),
             fast: std::sync::RwLock::new(None),
-            counter: AtomicU64::new(0),
             mem_cache: Mutex::new(MemCache::new()),
             pch_locks: Mutex::new(HashMap::new()),
             splits: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// `Mwcc::new(default_root(), default_work(), 6)`.
-    pub fn default_driver() -> Mwcc {
-        Mwcc::new(&default_root(), &default_work(), 6)
     }
 
     /// Process-unique scratch stem. The counter is process-wide: several `Mwcc` instances (one per
@@ -365,7 +366,6 @@ impl Mwcc {
     fn unique(&self, stem: &str) -> String {
         static UNIQUE: AtomicU64 = AtomicU64::new(0);
         let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
-        self.counter.fetch_add(1, Ordering::Relaxed);
         format!("{stem}_{}_{n}", std::process::id())
     }
 
@@ -489,7 +489,7 @@ impl Mwcc {
                 Err(MwccError::Compile { messages, .. }) if self.transient_io(messages) => {
                     attempt += 1;
                     if attempt >= IO_RETRIES {
-                        break Err(MwccError::Io(format!("compiler could not open a work file: {}", messages.lines().take(3).collect::<Vec<_>>().join(" | "))));
+                        break Err(MwccError::Io(format!("compiler could not open a work file: {}", first_lines(&messages))));
                     }
                     std::thread::sleep(Duration::from_millis(150 * attempt as u64));
                 }
@@ -562,14 +562,14 @@ impl Mwcc {
             let tmp_mch = self.build_mch(context, cflags, &dir, "ctx")?;
             publish(&tmp_mch, &mch);
         }
-        Ok(UnitContext { cflags: cflags.to_vec(), context: context.to_string(), mch: Some(mch), hash, text: String::new(), excluded: vec![], tu_name: None })
+        Ok(UnitContext::new(cflags, context, Some(mch), hash))
     }
 
     /// Precompile `context` into a private `.mch` (a unique file the caller owns and deletes).
     pub(crate) fn precompile_private(&self, context: &str, cflags: &[String]) -> Result<UnitContext, MwccError> {
         let hash = content_hash(&[CACHE_SALT.as_bytes(), self.compiler_id().as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
         let mch = self.build_mch(context, cflags, &self.work.join("pch"), "trial")?;
-        Ok(UnitContext { cflags: cflags.to_vec(), context: context.to_string(), mch: Some(mch), hash, text: String::new(), excluded: vec![], tu_name: None })
+        Ok(UnitContext::new(cflags, context, Some(mch), hash))
     }
 
     /// Run the precompiler on `context` into a new uniquely named `.mch` in `dir` (retrying when
@@ -599,7 +599,7 @@ impl Mwcc {
                 MwccError::Compile { messages, .. } if self.transient_io(messages) => {
                     attempt += 1;
                     if attempt >= IO_RETRIES {
-                        return Err(MwccError::Io(format!("precompiling: {}", messages.lines().take(3).collect::<Vec<_>>().join(" | "))));
+                        return Err(MwccError::Io(format!("precompiling: {}", first_lines(&messages))));
                     }
                     std::thread::sleep(Duration::from_millis(150 * attempt as u64));
                 }
@@ -612,7 +612,7 @@ impl Mwcc {
     /// and the reference for verifying that PCH does not change codegen).
     pub fn plain_context(&self, context: &str, cflags: &[String]) -> UnitContext {
         let hash = content_hash(&[CACHE_SALT.as_bytes(), b"plain", self.compiler_id().as_bytes(), &flags_bytes(cflags), context.as_bytes()]);
-        UnitContext { cflags: cflags.to_vec(), context: context.to_string(), mch: None, hash, text: String::new(), excluded: vec![], tu_name: None }
+        UnitContext::new(cflags, context, None, hash)
     }
 
     /// Compile candidate code (function definitions etc.) in a unit context. Results (objects and
@@ -740,7 +740,7 @@ impl Mwcc {
                     // context), else the plain context (same codegen, much slower).
                     Err(MwccError::Crash { status, messages }) => {
                         if log {
-                            eprintln!("mwcc: PCH compile crashed (status {status:?}, code#{:08x}, split {}). {}", content_hash(&[code.as_bytes()]) as u32, split.is_some(), messages.lines().take(3).collect::<Vec<_>>().join(" | "));
+                            eprintln!("mwcc: PCH compile crashed (status {status:?}, code#{:08x}, split {}). {}", content_hash(&[code.as_bytes()]) as u32, split.is_some(), first_lines(&messages));
                         }
                         let rep = if split.is_none() { self.repair(ctx, code) } else { None };
                         match rep.map(|sp| self.compile_pch(&sp, code)) {

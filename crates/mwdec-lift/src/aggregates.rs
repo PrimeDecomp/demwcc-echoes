@@ -142,13 +142,8 @@ struct Copy {
     temp_def: Option<usize>,
 }
 
-pub fn merge_copies(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &dyn Fn(VarId) -> bool, db: &TypeDb) {
-    let mut retype = vec![];
-    let none = HashMap::new();
-    Stmt::for_each_block_mut(body, &mut |b| merge_in_list(b, vars, is_temp, db, &mut retype, &none, false));
-}
-
-/// `merge_copies`, also typing untyped stack regions that receive a whole-object copy at their
+/// Member-wise copies of a whole struct merged into one assignment (see the module doc), also
+/// typing untyped stack regions that receive a whole-object copy at their
 /// start (`T v = gSomeT;` copied member-wise into a buffer).
 pub fn merge_copies_typing(body: &mut Vec<Stmt>, vars: &mut [Var], is_temp: &dyn Fn(VarId) -> bool, db: &TypeDb, ctor: bool) {
     // a region that is a by-value argument's copy stays as it is (the by-value forwarding
@@ -165,7 +160,7 @@ pub fn merge_copies_typing(body: &mut Vec<Stmt>, vars: &mut [Var], is_temp: &dyn
             for (n, a) in args.iter().enumerate() {
                 if let Expr::AddrOf(x) = a {
                     if let Expr::Var(v) = **x {
-                        let by_ref = sig.and_then(|s| s.params.get(n)).map_or(true, |p| is_ptr(&p.ty));
+                        let by_ref = sig.and_then(|s| s.params.get(n)).is_none_or(|p| is_ptr(&p.ty));
                         if !by_ref {
                             byval_arg.push(v);
                         }
@@ -260,7 +255,7 @@ pub fn merge_copies_typing(body: &mut Vec<Stmt>, vars: &mut [Var], is_temp: &dyn
     for (v, t) in seen {
         if let Some(t) = t {
             let size = types::size_of(Some(db), &t).unwrap_or(0) as i64;
-            if !byval_arg.contains(&v) && !rvalue_arg.contains(&v) && extent.get(&v).map_or(true, |e| *e <= size) {
+            if !byval_arg.contains(&v) && !rvalue_arg.contains(&v) && extent.get(&v).is_none_or(|e| *e <= size) {
                 vars[v].ty = t;
             }
         }
@@ -350,7 +345,7 @@ fn merge_in_list(b: &mut Vec<Stmt>, vars: &[Var], is_temp: &dyn Fn(VarId) -> boo
                 let dts = if untyped_dst.is_some() && base_class(&c0.dst_base, c0.dst_ptr, vars, db).is_none() {
                     let (uv, usize_) = untyped_dst.unwrap();
                     let need = extent.get(&uv).copied().unwrap_or(0);
-                    aggregate_at(db, &scls, smin).into_iter().filter(|t| types::size_of(Some(db), t).map_or(false, |s| s <= usize_ && s as i64 >= need)).collect::<Vec<_>>()
+                    aggregate_at(db, &scls, smin).into_iter().filter(|t| types::size_of(Some(db), t).is_some_and(|s| s <= usize_ && s as i64 >= need)).collect::<Vec<_>>()
                 } else if raw_ptr_dst {
                     aggregate_at(db, &scls, smin)
                 } else {
@@ -389,7 +384,7 @@ fn merge_in_list(b: &mut Vec<Stmt>, vars: &[Var], is_temp: &dyn Fn(VarId) -> boo
                     // temps folded must not be used outside the window
                     let window: Vec<usize> = group.iter().map(|c| c.stmt).chain(group.iter().filter_map(|c| c.temp_def)).collect();
                     let temp_ids: Vec<VarId> = temps.iter().filter(|(_, (k, _))| window.contains(k)).map(|(t, _)| *t).collect();
-                    let used_outside = b.iter().enumerate().any(|(k, s)| !window.contains(&k) && temp_ids.iter().any(|t| stmt_uses(s, *t)));
+                    let used_outside = b.iter().enumerate().any(|(k, s)| !window.contains(&k) && temp_ids.iter().any(|t| Stmt::uses_var(s, *t)));
                     if used_outside {
                         continue;
                     }
@@ -464,16 +459,6 @@ pub fn transfers_on_assign(db: &TypeDb, t: &Type) -> bool {
                 _ => false,
             } || d.inline_body.as_deref().is_some_and(|b| b.split(' ').any(|w| w == "if" || w == "(" || w == "delete")))
     })
-}
-
-fn stmt_uses(s: &Stmt, t: VarId) -> bool {
-    let mut found = false;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(v) if *v == t) {
-            found = true;
-        }
-    });
-    found
 }
 
 fn is_literal_sym(n: &str) -> bool {
@@ -757,7 +742,7 @@ pub fn patched_literal_arrays(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, obj: &m
                         }
                     }
                 }
-                if stmt_uses(s, v) || !matches!(s, Stmt::Assign { dst: Expr::Var(_), .. }) {
+                if Stmt::uses_var(s, v) || !matches!(s, Stmt::Assign { dst: Expr::Var(_), .. }) {
                     break;
                 }
             }
@@ -766,7 +751,7 @@ pub fn patched_literal_arrays(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, obj: &m
                 continue;
             }
             // the temps only serve the copies
-            let temp_used_elsewhere = temps.keys().any(|t| b.iter().enumerate().any(|(k, s)| !removable.contains(&k) && stmt_uses(s, *t)));
+            let temp_used_elsewhere = temps.keys().any(|t| b.iter().enumerate().any(|(k, s)| !removable.contains(&k) && Stmt::uses_var(s, *t)));
             if temp_used_elsewhere {
                 i += 1;
                 continue;

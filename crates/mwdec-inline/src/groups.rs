@@ -5,6 +5,7 @@ use crate::addr::{access, lvalue_addr, object_at};
 use crate::matcher::{res, teq, Bind, Env, Index, M};
 use crate::template::{flat_fields, HoleKind, Shape};
 use crate::util::*;
+use mwdec_lift::strip_cv;
 use mwdec_core::Type;
 use mwdec_lift::types::ty_of;
 use mwdec_lift::{Expr, Stmt};
@@ -22,7 +23,7 @@ struct CStore {
 }
 
 fn scalar_vc(t: &Type) -> bool {
-    matches!(strip(t), Type::Float { .. } | Type::Int { .. } | Type::Long { .. } | Type::Char | Type::Bool | Type::WChar | Type::Ptr(_) | Type::FuncPtr(_) | Type::Unknown { size: 1 | 2 | 4 | 8 })
+    matches!(strip_cv(t), Type::Float { .. } | Type::Int { .. } | Type::Long { .. } | Type::Char | Type::Bool | Type::WChar | Type::Ptr(_) | Type::FuncPtr(_) | Type::Unknown { size: 1 | 2 | 4 | 8 })
 }
 
 fn store_size(t: &Type) -> u32 {
@@ -251,7 +252,7 @@ pub fn rewrite_groups(b: &mut Vec<Stmt>, env: &Env, idx: &Index) -> usize {
             };
             let limit = *seg_limit.get_or_insert_with(|| 2 * nodes(&b[start..end]) + 32);
             if let Some((new, rm_lo)) = try_segment(b, start, end, env, idx).filter(|(new, _)| nodes(new) <= limit) {
-                if std::env::var("MWDI_TRACE_REWRITE").is_ok() {
+                if env_flag!("MWDI_TRACE_REWRITE") {
                     eprintln!("GROUP rewrite {start}..{end} -> {} stmts: {}", new.len(), format!("{:?}", new).chars().take(300).collect::<String>());
                 }
                 // replace: new statement list for the segment
@@ -294,7 +295,7 @@ fn try_segment(b: &[Stmt], start: usize, end: usize, env: &Env, idx: &Index) -> 
             }
         };
     }
-    if std::env::var("MWDI_TRACE_G").is_ok() {
+    if env_flag!("MWDI_TRACE_G") {
         for s in &stores {
             eprintln!("STORE stmt {} aid {} +{} {:?} addr {:?}", s.stmt, s.aid, s.off, s.ty, s.addr);
         }
@@ -321,7 +322,7 @@ fn try_segment(b: &[Stmt], start: usize, end: usize, env: &Env, idx: &Index) -> 
             },
             _ => continue,
         };
-        let tr = std::env::var("MWDI_TRACE_G").is_ok_and(|f| t.name.contains(f.as_str()));
+        let tr = env_value!("MWDI_TRACE_G").is_some_and(|f| t.name.contains(f));
         // a mutator of plain member stores (`SetTranslation`): only for private members of
         // another class, which the caller could not have written itself
         if mutate.is_some() && t.ops == 0 && t.dead.is_empty() && !foreign_private(&cls, env) {
@@ -378,7 +379,7 @@ fn try_segment(b: &[Stmt], start: usize, end: usize, env: &Env, idx: &Index) -> 
                 // a plain member-wise copy stays an assignment (but a mutator copying part of an
                 // object whose members the function can't name is the call:
                 // `xf.SetTranslation(other.GetTranslation())`)
-                let whole = flat_fields(env.db, &cls).map_or(true, |f| f.len() == comps.len());
+                let whole = flat_fields(env.db, &cls).is_none_or(|f| f.len() == comps.len());
                 if mutate.is_none() || whole {
                     continue;
                 }
@@ -392,7 +393,7 @@ fn try_segment(b: &[Stmt], start: usize, end: usize, env: &Env, idx: &Index) -> 
                 // (temps loaded in between don't count: `t = src.y; d.x = src.x; d.y = t;`)
                 let consecutive = ss.windows(2).all(|w| (w[0] + 1..w[1]).all(|k| matches!(&b[k], Stmt::Assign { dst: Expr::Var(_), src } if !src.has_call())));
                 let stack_dst = matches!(&anchor.addr, Expr::AddrOf(x) if matches!(&**x, Expr::Var(_))) || matches!(&anchor.addr, Expr::Var(v) if env.vars[*v].kind == mwdec_lift::VarKind::StructRet);
-                let hidden = mwdec_lift::sig::find_class(env.db, &cls).map_or(false, |c| c.fields.iter().any(|f| f.access != mwdec_core::Access::Public));
+                let hidden = mwdec_lift::sig::find_class(env.db, &cls).is_some_and(|c| c.fields.iter().any(|f| f.access != mwdec_core::Access::Public));
                 // assigning a constructed temporary to a member needs the class's copy
                 // assignment; a class declaring its own operator= (smart pointers) is assigned
                 // through that instead
@@ -473,14 +474,14 @@ fn try_segment(b: &[Stmt], start: usize, end: usize, env: &Env, idx: &Index) -> 
                     out.push(new_stmt.clone());
                 }
             }
-            if mutate.is_some() && best_mut.as_ref().map_or(true, |(b, ..)| score > *b) {
+            if mutate.is_some() && best_mut.as_ref().is_none_or(|(b, ..)| score > *b) {
                 best_mut = Some((score, out.clone(), lo, stmts.clone()));
             }
             // (a stack object built from nothing: of a mutator and a constructor with the same
             // expansion, the constructor (`CColor c(r, g, b, a)`, not `CColor c; c.Set(...)`))
             let fresh_stack = matches!(&anchor.addr, Expr::AddrOf(x) if matches!(&**x, Expr::Var(v) if matches!(env.vars[*v].kind, mwdec_lift::VarKind::Stack { .. })));
-            let ctor_tie = std::env::var("MWDI_NO_CTOR_TIE").is_err() && fresh_stack && mutate.is_none() && matches!(t.kind, crate::probe::CallKind::Ctor) && best.as_ref().is_some_and(|(b, _, _, was_mut, _)| score == *b && *was_mut);
-            if best.as_ref().map_or(true, |(b, ..)| score > *b) || ctor_tie {
+            let ctor_tie = !env_flag!("MWDI_NO_CTOR_TIE") && fresh_stack && mutate.is_none() && matches!(t.kind, crate::probe::CallKind::Ctor) && best.as_ref().is_some_and(|(b, _, _, was_mut, _)| score == *b && *was_mut);
+            if best.as_ref().is_none_or(|(b, ..)| score > *b) || ctor_tie {
                 best = Some((score, out, lo, mutate.is_some(), stmts));
             }
         }
@@ -498,7 +499,7 @@ fn try_segment(b: &[Stmt], start: usize, end: usize, env: &Env, idx: &Index) -> 
 
 /// Does `cls` have non-public members and the function isn't one of its own?
 fn foreign_private(cls: &str, env: &Env) -> bool {
-    let hidden = mwdec_lift::sig::find_class(env.db, cls).map_or(false, |c| c.fields.iter().any(|f| f.access != mwdec_core::Access::Public));
+    let hidden = mwdec_lift::sig::find_class(env.db, cls).is_some_and(|c| c.fields.iter().any(|f| f.access != mwdec_core::Access::Public));
     let own = env.vars.iter().any(|v| v.kind == mwdec_lift::VarKind::This && mwdec_lift::pointee(&v.ty).and_then(|t| class_name(t, env.db)).as_deref() == Some(cls));
     hidden && !own
 }
@@ -526,7 +527,7 @@ fn is_copy(pick: &[&CStore], delta: i32, cls: &str, env: &Env) -> bool {
 }
 
 fn scalar_compat(a: &Type, b: &Type) -> bool {
-    let fa = matches!(strip(a), Type::Float { .. });
-    let fb = matches!(strip(b), Type::Float { .. });
+    let fa = matches!(strip_cv(a), Type::Float { .. });
+    let fb = matches!(strip_cv(b), Type::Float { .. });
     fa == fb && mwdec_lift::scalar_size(a).unwrap_or(4) == mwdec_lift::scalar_size(b).unwrap_or(4)
 }

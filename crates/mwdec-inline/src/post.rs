@@ -16,16 +16,6 @@ fn mentions_body(body: &[Stmt]) -> HashMap<VarId, usize> {
     m
 }
 
-fn mentions(s: &Stmt, v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(std::slice::from_ref(s), &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1;
-        }
-    });
-    n
-}
-
 pub fn is_folded_value(e: &Expr) -> bool {
     folded_value(e)
 }
@@ -76,14 +66,14 @@ fn replace_arg(e: &mut Expr, v: VarId, with: &Expr, only_folded: bool, real_call
             _ => return,
         };
         // (a stack object built by a real constructor call moves only into folded inlines)
-        if only_folded && !sig.as_ref().is_some_and(|s| s.mangled.is_none()) {
+        if only_folded && sig.as_ref().is_none_or(|s| s.mangled.is_some()) {
             return;
         }
         // the object of a const member function call: `(a - b).MagSquared()` (a real call's
         // result too, into a folded inline: `GetAverage().valid()`)
         if let (true, Expr::Call { callee: Callee::Method { this, sig: msig, .. }, .. }) = (!only_folded || real_call, &mut *x) {
             if msig.is_const && matches!(&**this, Expr::AddrOf(y) if matches!(&**y, Expr::Var(w) if *w == v)) {
-                *this = Box::new(Expr::AddrOf(Box::new(with.clone())));
+                **this = Expr::AddrOf(Box::new(with.clone()));
                 n += 1;
             }
         }
@@ -94,7 +84,7 @@ fn replace_arg(e: &mut Expr, v: VarId, with: &Expr, only_folded: bool, real_call
         for (k, a) in args.iter_mut().enumerate() {
             // only where the parameter takes the object itself (reference or by value), not
             // its address
-            let by_ref = sig.as_ref().and_then(|s| s.params.get(k)).map_or(false, |p| matches!(crate::util::strip(&p.ty), Type::Ref(_) | Type::Named(_)));
+            let by_ref = sig.as_ref().and_then(|s| s.params.get(k)).is_some_and(|p| matches!(mwdec_lift::strip_cv(&p.ty), Type::Ref(_) | Type::Named(_)));
             if is_v(a) && by_ref {
                 *a = with.clone();
                 n += 1;
@@ -139,14 +129,14 @@ pub fn forward_stack_temps(body: &mut Vec<Stmt>, vars: &[Var], dead: &[mwdec_lif
         while i < b.len() {
             let (v, val, only_folded, real_call) = match &b[i] {
                 Stmt::Assign { dst: Expr::Var(v), src }
-                    if matches!(vars[*v].kind, VarKind::Stack { .. } | VarKind::Local) && matches!(crate::util::strip(&vars[*v].ty), Type::Named(_)) && folded_value(src) && counts.get(v) == Some(&2) && !named_copy(*v) =>
+                    if matches!(vars[*v].kind, VarKind::Stack { .. } | VarKind::Local) && matches!(mwdec_lift::strip_cv(&vars[*v].ty), Type::Named(_)) && folded_value(src) && counts.get(v) == Some(&2) && !named_copy(*v) =>
                 {
                     (*v, src.clone(), false, false)
                 }
                 // a stack object holding a real call's by-value result, passed on once into a
                 // folded inline (`Deltas(Lerp(..), Slerp(..))`)
                 Stmt::Assign { dst: Expr::Var(v), src: src @ Expr::Call { callee: Callee::Direct { sig, .. } | Callee::Method { sig, .. } | Callee::Virtual { sig: Some(sig), .. }, .. } }
-                    if sig.mangled.is_some() && matches!(vars[*v].kind, VarKind::Stack { .. }) && matches!(crate::util::strip(&vars[*v].ty), Type::Named(_)) && counts.get(v) == Some(&2) =>
+                    if sig.mangled.is_some() && matches!(vars[*v].kind, VarKind::Stack { .. }) && matches!(mwdec_lift::strip_cv(&vars[*v].ty), Type::Named(_)) && counts.get(v) == Some(&2) =>
                 {
                     (*v, src.clone(), true, true)
                 }
@@ -163,7 +153,7 @@ pub fn forward_stack_temps(body: &mut Vec<Stmt>, vars: &[Var], dead: &[mwdec_lif
                     continue;
                 }
             };
-            let Some(j) = (i + 1..b.len()).find(|&k| mentions(&b[k], v) > 0) else {
+            let Some(j) = (i + 1..b.len()).find(|&k| Stmt::count_var(&b[k], v) > 0) else {
                 i += 1;
                 continue;
             };
@@ -172,7 +162,7 @@ pub fn forward_stack_temps(body: &mut Vec<Stmt>, vars: &[Var], dead: &[mwdec_lif
                 continue;
             }
             let mut s = b[j].clone();
-            if stmt_replace_arg(&mut s, v, &val, only_folded, real_call) == 1 && mentions(&s, v) == 0 {
+            if stmt_replace_arg(&mut s, v, &val, only_folded, real_call) == 1 && Stmt::count_var(&s, v) == 0 {
                 b[j] = s;
                 b.remove(i);
                 n += 1;
@@ -187,7 +177,7 @@ pub fn forward_stack_temps(body: &mut Vec<Stmt>, vars: &[Var], dead: &[mwdec_lif
 /// A stack object holding a real call's by-value result, copied whole once by the next statement
 /// (`T t = a + b; *this = t;`): the assignment of the call's result (`*this = a + b;`).
 pub fn forward_call_into_copy(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
-    if std::env::var_os("MWDI_NO_CALL_COPIES").is_some() {
+    if env_flag!("MWDI_NO_CALL_COPIES") {
         return 0;
     }
     let counts = mentions_body(body);
@@ -202,11 +192,11 @@ pub fn forward_call_into_copy(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                 ) if v == w
                     && sig.mangled.is_some()
                     && matches!(vars[*v].kind, VarKind::Stack { .. })
-                    && matches!(crate::util::strip(&vars[*v].ty), Type::Named(_))
+                    && matches!(mwdec_lift::strip_cv(&vars[*v].ty), Type::Named(_))
                     && counts.get(v) == Some(&2)
                     && !matches!(dst, Expr::Var(_))
                     && !dst.uses_var(*v)
-                    && crate::util::strip(&mwdec_lift::types::ty_of(dst, vars)) == crate::util::strip(&vars[*v].ty) =>
+                    && mwdec_lift::strip_cv(&mwdec_lift::types::ty_of(dst, vars)) == mwdec_lift::strip_cv(&vars[*v].ty) =>
                 {
                     Some(Stmt::Assign { dst: dst.clone(), src: call.clone() })
                 }
@@ -228,7 +218,7 @@ pub fn forward_call_into_copy(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
 /// Locals assigned only from folded inline calls returning `bool` take that type (`b =
 /// IsAllocated()` stays a `bool`: as an `unsigned int` a later `bool` parameter normalises it).
 pub fn retype_bool_call_locals(body: &[Stmt], vars: &mut [Var]) -> usize {
-    if std::env::var_os("MWDI_NO_BOOL_LOCALS").is_some() {
+    if env_flag!("MWDI_NO_BOOL_LOCALS") {
         return 0;
     }
     let mut defs: HashMap<VarId, (usize, usize)> = HashMap::new();
@@ -238,7 +228,7 @@ pub fn retype_bool_call_locals(body: &[Stmt], vars: &mut [Var]) -> usize {
                 Stmt::Assign { dst: Expr::Var(v), src } => {
                     let e = defs.entry(*v).or_default();
                     e.0 += 1;
-                    let folded_bool = matches!(src, Expr::Call { callee: Callee::Direct { sig, .. } | Callee::Method { sig, .. }, ret, .. } if sig.mangled.is_none() && matches!(crate::util::strip(ret), Type::Bool) && matches!(crate::util::strip(&sig.ret), Type::Bool));
+                    let folded_bool = matches!(src, Expr::Call { callee: Callee::Direct { sig, .. } | Callee::Method { sig, .. }, ret, .. } if sig.mangled.is_none() && matches!(mwdec_lift::strip_cv(ret), Type::Bool) && matches!(mwdec_lift::strip_cv(&sig.ret), Type::Bool));
                     if folded_bool {
                         e.1 += 1;
                     }
@@ -265,7 +255,7 @@ pub fn retype_bool_call_locals(body: &[Stmt], vars: &mut [Var]) -> usize {
     walk(body, &mut defs);
     let mut n = 0;
     for (v, (all, folded)) in defs {
-        if all > 0 && all == folded && matches!(vars[v].kind, VarKind::Local) && matches!(crate::util::strip(&vars[v].ty), Type::Int { .. } | Type::Unknown { .. }) {
+        if all > 0 && all == folded && matches!(vars[v].kind, VarKind::Local) && matches!(mwdec_lift::strip_cv(&vars[v].ty), Type::Int { .. } | Type::Unknown { .. }) {
             vars[v].ty = Type::Bool;
             n += 1;
         }
@@ -280,7 +270,7 @@ fn collect_folded<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         let mutator = matches!(x, Expr::Call { callee: Callee::Method { sig, .. }, .. } if !sig.is_const);
         // (`l.end()` / `l.begin()`: the source calls the accessors again)
         let bounds = matches!(x, Expr::Call { callee: Callee::Method { sig, .. }, args, .. } if args.is_empty() && matches!(sig.qualified_name.rsplit("::").next(), Some("begin" | "end")));
-        if folded_value(x) && !mutator && !bounds && matches!(x, Expr::Call { ret, .. } if matches!(crate::util::strip(ret), Type::Named(_))) {
+        if folded_value(x) && !mutator && !bounds && matches!(x, Expr::Call { ret, .. } if matches!(mwdec_lift::strip_cv(ret), Type::Named(_))) {
             out.push(x);
         }
     });
@@ -379,7 +369,7 @@ pub fn forward_cond_temps(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
         let mut i = 0;
         while i + 1 < b.len() {
             let fwd = match &b[i] {
-                Stmt::Assign { dst: Expr::Var(v), src } if matches!(vars[*v].kind, VarKind::Local) && folded_value(src) && counts.get(v) == Some(&2) && mentions(&b[i + 1], *v) == 1 => {
+                Stmt::Assign { dst: Expr::Var(v), src } if matches!(vars[*v].kind, VarKind::Local) && folded_value(src) && counts.get(v) == Some(&2) && Stmt::count_var(&b[i + 1], *v) == 1 => {
                     let ok = match &b[i + 1] {
                         Stmt::If { cond, .. } => cond.uses_var(*v),
                         Stmt::Return(Some(e)) => e.uses_var(*v),
@@ -486,7 +476,7 @@ pub fn forward_temps_into_folded(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
             if !is_temp(v) || counts.get(&v) != Some(&2) || src.has_call() || matches!(src, Expr::IncDec { .. }) {
                 continue;
             }
-            let Some(j) = (i + 1..b.len()).find(|&k| mentions(&b[k], v) > 0) else { continue };
+            let Some(j) = (i + 1..b.len()).find(|&k| Stmt::count_var(&b[k], v) > 0) else { continue };
             // the consumer: a folded value taking the temp as an argument
             let mut in_folded = false;
             for e in stmt_exprs(&b[j]) {
@@ -593,7 +583,7 @@ pub fn fold_flag_chains(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
             }
             // the flag read once by the next statement: its value goes there
             let uses = counts.get(&v).copied().unwrap_or(0);
-            let next_ok = i + 2 < b.len() && uses == 3 && mentions(&b[i + 2], v) == 1 && matches!(&b[i + 2], Stmt::Return(Some(_)) | Stmt::If { .. });
+            let next_ok = i + 2 < b.len() && uses == 3 && Stmt::count_var(&b[i + 2], v) == 1 && matches!(&b[i + 2], Stmt::Return(Some(_)) | Stmt::If { .. });
             if next_ok {
                 let mut s = b[i + 2].clone();
                 let sub = &mut |x: &mut Expr| {

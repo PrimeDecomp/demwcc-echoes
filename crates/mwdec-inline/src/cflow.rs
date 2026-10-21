@@ -111,7 +111,7 @@ pub fn canon(e: &mut Expr) {
             Expr::Ternary { c, t, f, .. } => {
                 if let Expr::Unary { op: UnOp::Not, e: inner, .. } = &**c {
                     let inner = (**inner).clone();
-                    *c = Box::new(inner);
+                    **c = inner;
                     std::mem::swap(t, f);
                     true
                 } else if let Expr::Binary { op, l, r, .. } = &mut **c {
@@ -225,7 +225,7 @@ pub fn bool_form(e: &Expr) -> Option<Expr> {
 /// The condition form of a `bool` inline with a control-flow value (see [`bool_form`]).
 pub fn bool_template(t: &crate::Template) -> Option<crate::Template> {
     let Shape::Scalar(p) = &t.shape else { return None };
-    if !matches!(crate::util::strip(&t.sig.ret), Type::Bool) || t.ret_ref {
+    if !matches!(mwdec_lift::strip_cv(&t.sig.ret), Type::Bool) || t.ret_ref {
         return None;
     }
     let q = bool_form(p)?;
@@ -253,16 +253,6 @@ pub fn has_cflow(e: &Expr) -> bool {
 
 use crate::matcher::{make_call, use_score, Env as MEnv, Index, M};
 use crate::template::Shape;
-
-fn uses_in(b: &[Stmt], v: VarId) -> usize {
-    let mut n = 0;
-    Stmt::walk_exprs(b, &mut |e| {
-        if matches!(e, Expr::Var(x) if *x == v) {
-            n += 1;
-        }
-    });
-    n
-}
 
 fn assigned(b: &[Stmt], out: &mut Vec<VarId>) {
     for s in b {
@@ -294,19 +284,6 @@ fn truth_operands(e: &mut Expr) {
             }
         }
     }
-}
-
-/// Fold if-regions that compute one value into a call of a control-flow inline.
-pub fn rewrite_regions(b: &mut Vec<Stmt>, whole: &[Stmt], env: &MEnv, idx: &Index) -> usize {
-    let mut n = 0;
-    let mut i = 0;
-    while i < b.len() {
-        if try_region_at(b, i, whole, env, idx) {
-            n += 1;
-        }
-        i += 1;
-    }
-    n
 }
 
 /// Assignments to `v` in `w` (nested lists too).
@@ -352,8 +329,8 @@ pub fn try_region_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &MEnv, id
                     c
                 };
                 // (a variable the window assigns again is its result, `v = a; if (c) v = b;`)
-                let result = std::env::var_os("MWDI_NO_REGION_DEFAULTS").is_none() && assigns_in(w, *v) > 1;
-                calls || uses_in(w, *v) > 1 && !result && !matches!(src, Expr::Int { .. } | Expr::Float { .. } | Expr::Var(_))
+                let result = !env_flag!("MWDI_NO_REGION_DEFAULTS") && assigns_in(w, *v) > 1;
+                calls || mwdec_lift::count_var(w, *v) > 1 && !result && !matches!(src, Expr::Int { .. } | Expr::Float { .. } | Expr::Var(_))
             }
             _ => false,
         });
@@ -396,12 +373,12 @@ pub fn try_region_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &MEnv, id
         let mut best: Option<(i32, Option<VarId>, Expr)> = None;
         for (tv, mut val) in cands {
             // other values computed in the window must not be needed after it
-            let ok = asg.iter().all(|v| Some(*v) == tv || uses_in(whole, *v) == uses_in(w, *v));
+            let ok = asg.iter().all(|v| Some(*v) == tv || mwdec_lift::count_var(whole, *v) == mwdec_lift::count_var(w, *v));
             if !ok {
                 continue;
             }
             canon(&mut val);
-            let trace = std::env::var("MWDI_TRACE").is_ok();
+            let trace = env_flag!("MWDI_TRACE");
             if trace {
                 eprintln!("REGION value {val:?}");
             }
@@ -410,14 +387,14 @@ pub fn try_region_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &MEnv, id
                 let Shape::Scalar(p) = &t.shape else { continue };
                 let mut m = M::new(env, t);
                 if !m.m(p, &val) {
-                    if trace && std::env::var("MWDI_TRACE").map_or(false, |f| t.name.contains(f.as_str())) {
+                    if trace && env_value!("MWDI_TRACE").is_some_and(|f| t.name.contains(f)) {
                         eprintln!("  no match {}: {p:?}", t.name);
                     }
                     continue;
                 }
                 let Some((args, extra)) = m.finalize(0) else { continue };
                 let sc = use_score(t, extra, false, &args);
-                if sc >= crate::matcher::MIN_SCORE && best.as_ref().map_or(true, |(b, _, _)| sc > *b) {
+                if sc >= crate::matcher::MIN_SCORE && best.as_ref().is_none_or(|(b, _, _)| sc > *b) {
                     let mut call = make_call(t, args);
                     if t.ret_ref {
                         // the value is the address of the referenced object
@@ -444,7 +421,7 @@ pub fn try_region_at(b: &mut Vec<Stmt>, i: usize, whole: &[Stmt], env: &MEnv, id
 pub fn truth_canon(e: &mut Expr) {
     fn bare(x: &Expr) -> Expr {
         match x {
-            Expr::Cast { ty, e } if matches!(crate::util::strip(ty), Type::Int { .. } | Type::Bool) && !matches!(**e, Expr::Binary { .. }) => (**e).clone(),
+            Expr::Cast { ty, e } if matches!(mwdec_lift::strip_cv(ty), Type::Int { .. } | Type::Bool) && !matches!(**e, Expr::Binary { .. }) => (**e).clone(),
             x => x.clone(),
         }
     }

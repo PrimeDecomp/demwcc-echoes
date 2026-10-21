@@ -9,19 +9,12 @@ fn has_cmp_operator(db: &TypeDb, c: &str, op: BinOp) -> bool {
     if db.decls.contains_key(&format!("{c}::{name}")) {
         return true;
     }
-    db.decls.get(name).map_or(false, |ds| {
-        ds.iter().any(|d| d.params.first().map_or(false, |p| match strip_cv(&p.ty) {
-            Type::Ref(t) => named(strip_cv(t)).map_or(false, |n| crate::sig::norm_name(n) == crate::sig::norm_name(c)),
+    db.decls.get(name).is_some_and(|ds| {
+        ds.iter().any(|d| d.params.first().is_some_and(|p| match strip_cv(&p.ty) {
+            Type::Ref(t) => named(strip_cv(t)).is_some_and(|n| crate::sig::norm_name(n) == crate::sig::norm_name(c)),
             _ => false,
         }))
     })
-}
-
-fn strip_casts(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_casts(e),
-        e => e,
-    }
 }
 
 /// The object whose only scalar `e` reads (`obj.value` of a one-member class with a comparison

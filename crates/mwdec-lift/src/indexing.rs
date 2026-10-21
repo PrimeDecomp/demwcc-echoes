@@ -5,16 +5,9 @@ use crate::ir::*;
 use crate::types;
 use mwdec_core::{Type, TypeDb};
 
-fn uncast(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => uncast(e),
-        e => e,
-    }
-}
-
 /// `i * k` / `i << s` -> (i, k)
 fn scaled(e: &Expr) -> Option<(Expr, i64)> {
-    match uncast(e) {
+    match strip_casts(e) {
         Expr::Binary { op: BinOp::Mul, l, r, .. } => match (r.as_int(), l.as_int()) {
             (Some(k), _) => Some(((**l).clone(), k)),
             (None, Some(k)) => Some(((**r).clone(), k)),
@@ -30,7 +23,7 @@ fn split_offset(e: &Expr) -> Option<(Expr, i64, i64)> {
     if let Some((i, k)) = scaled(e) {
         return Some((i, k, 0));
     }
-    match uncast(e) {
+    match strip_casts(e) {
         Expr::Binary { op: BinOp::Add, l, r, .. } => {
             if let Some(c) = r.as_int() {
                 let (i, k, c2) = split_offset(l)?;
@@ -114,7 +107,7 @@ pub fn recover(body: &mut [Stmt], vars: &[Var], db: Option<&TypeDb>) {
 /// Scaled index of a raw byte offset: `i << s`, `i * 2^s`, `(i << s) & (0xff << s)` (an 8/16-bit
 /// index), or a plain byte index (`k = 1`).
 fn raw_scaled(e: &Expr) -> (Expr, i64) {
-    match uncast(e) {
+    match strip_casts(e) {
         Expr::Binary { op: BinOp::Shl, l, r, .. } => {
             if let Some(s) = r.as_int().filter(|s| (1..4).contains(s)) {
                 return ((**l).clone(), 1i64 << s);
@@ -126,7 +119,7 @@ fn raw_scaled(e: &Expr) -> (Expr, i64) {
             }
         }
         Expr::Binary { op: BinOp::And, l, r, .. } => {
-            if let (Expr::Binary { op: BinOp::Shl, l: x, r: sh, .. }, Some(m)) = (uncast(l), r.as_int()) {
+            if let (Expr::Binary { op: BinOp::Shl, l: x, r: sh, .. }, Some(m)) = (strip_casts(l), r.as_int()) {
                 if let Some(s) = sh.as_int().filter(|s| (1..4).contains(s)) {
                     for (w, sz) in [(0xffi64, 1u8), (0xffff, 2)] {
                         if m == w << s {
@@ -174,8 +167,8 @@ pub fn raw_index(body: &mut [Stmt], vars: &[Var]) {
         }
         // (a global's address materialised whole and an index scaled by a multiply, `lis; mulli;
         // addi; add; lwz c(rX)`: the byte spelling `(u8*)g + i * k + c` is that access already)
-        let global = matches!(uncast(p), Expr::Global { .. }) || matches!(uncast(p), Expr::AddrOf(g) if matches!(&**g, Expr::Global { .. }));
-        if global && matches!(uncast(off), Expr::Binary { op: BinOp::Mul, .. }) {
+        let global = matches!(strip_casts(p), Expr::Global { .. }) || matches!(strip_casts(p), Expr::AddrOf(g) if matches!(&**g, Expr::Global { .. }));
+        if global && matches!(strip_casts(off), Expr::Binary { op: BinOp::Mul, .. }) {
             return;
         }
         let pt = types::ty_of(p, vars);
@@ -231,7 +224,7 @@ fn undo_one(b: &mut Vec<Stmt>, vars: &[Var]) -> bool {
                         },
                         _ => continue,
                     };
-                    let zero = b[..k].iter().rposition(|s| crate::idioms::stmt_mentions(s, i)).is_some_and(|z| matches!(&b[z], Stmt::Assign { dst: Expr::Var(x), src } if *x == i && src.as_int() == Some(0)));
+                    let zero = b[..k].iter().rposition(|s| Stmt::uses_var(s, i)).is_some_and(|z| matches!(&b[z], Stmt::Assign { dst: Expr::Var(x), src } if *x == i && src.as_int() == Some(0)));
                     if !is_inc(st, i) || !zero {
                         continue;
                     }
@@ -242,8 +235,8 @@ fn undo_one(b: &mut Vec<Stmt>, vars: &[Var]) -> bool {
             // candidates: the trailing steps of the body (or of its trailing arm) `v = v + K`
             fn step_of(s: &Stmt) -> Option<(VarId, i64)> {
                 match s {
-                    Stmt::Assign { dst: Expr::Var(v), src } => match uncast(src) {
-                        Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(uncast(l), Expr::Var(x) if x == v) => r.as_int().map(|k| (*v, k)),
+                    Stmt::Assign { dst: Expr::Var(v), src } => match strip_casts(src) {
+                        Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(x) if x == v) => r.as_int().map(|k| (*v, k)),
                         _ => None,
                     },
                     _ => None,
@@ -335,11 +328,11 @@ fn undo_one(b: &mut Vec<Stmt>, vars: &[Var]) -> bool {
 
 /// `p = p + K` (through casts, or `&*(p + K)`): K.
 fn walk_step(src: &Expr, p: VarId) -> Option<i64> {
-    match uncast(src) {
-        Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(uncast(l), Expr::Var(y) if *y == p) => r.as_int(),
+    match strip_casts(src) {
+        Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if *y == p) => r.as_int(),
         // `&p->field` (`&*(p + k)`)
         Expr::AddrOf(x) => match &**x {
-            Expr::Load { base, offset, .. } if matches!(uncast(base), Expr::Var(y) if *y == p) => Some(*offset as i64),
+            Expr::Load { base, offset, .. } if matches!(strip_casts(base), Expr::Var(y) if *y == p) => Some(*offset as i64),
             _ => None,
         },
         _ => None,
@@ -349,7 +342,7 @@ fn walk_step(src: &Expr, p: VarId) -> Option<i64> {
 /// `i = i + 1` / `i++`
 fn is_inc(s: &Stmt, i: VarId) -> bool {
     match s {
-        Stmt::Assign { dst: Expr::Var(x), src } if *x == i => matches!(uncast(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(uncast(l), Expr::Var(y) if *y == i) && r.as_int() == Some(1)),
+        Stmt::Assign { dst: Expr::Var(x), src } if *x == i => matches!(strip_casts(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if *y == i) && r.as_int() == Some(1)),
         Stmt::Expr(Expr::IncDec { e, delta: 1, .. }) => matches!(**e, Expr::Var(x) if x == i),
         _ => false,
     }
@@ -382,14 +375,14 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
             // the loop: (counter, its body, the counter's step inside the body if any)
             let (i, lb, inc_at) = match &b[k] {
                 Stmt::DoWhile { body: lb, cond } => {
-                    let Expr::Binary { op: BinOp::Lt, l, .. } = uncast(cond) else { continue };
-                    let Expr::Var(i) = uncast(l) else { continue };
+                    let Expr::Binary { op: BinOp::Lt, l, .. } = strip_casts(cond) else { continue };
+                    let Expr::Var(i) = strip_casts(l) else { continue };
                     let Some(at) = lb.iter().position(|s| is_inc(s, *i)) else { continue };
                     (*i, lb, Some(at))
                 }
                 Stmt::For { init, cond, step, body: lb } => {
-                    let Expr::Binary { op: BinOp::Lt, l, .. } = uncast(cond) else { continue };
-                    let Expr::Var(i) = uncast(l) else { continue };
+                    let Expr::Binary { op: BinOp::Lt, l, .. } = strip_casts(cond) else { continue };
+                    let Expr::Var(i) = strip_casts(l) else { continue };
                     if !matches!(step.as_slice(), [s] if is_inc(s, *i)) || !matches!(init.as_slice(), [Stmt::Assign { dst: Expr::Var(x), src }] if x == i && src.as_int() == Some(0)) {
                         continue;
                     }
@@ -401,7 +394,7 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                 continue;
             }
             if inc_at.is_some() {
-                let Some(ii) = b[..k].iter().rposition(|s| crate::idioms::stmt_mentions(s, i)) else { continue };
+                let Some(ii) = b[..k].iter().rposition(|s| Stmt::uses_var(s, i)) else { continue };
                 if !matches!(&b[ii], Stmt::Assign { dst: Expr::Var(x), src } if *x == i && src.as_int() == Some(0)) {
                     continue;
                 }
@@ -412,11 +405,11 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                 let Stmt::Assign { dst: Expr::Var(p), src } = s else { continue };
                 let Some(kk) = walk_step(src, *p) else { continue };
                 let p = *p;
-                if p == i || !matches!(vars[p].kind, VarKind::Local) || kk <= 0 || assigns_var(lb, p) != 1 || lb[at + 1..].iter().any(|s| crate::idioms::stmt_mentions(s, p)) {
+                if p == i || !matches!(vars[p].kind, VarKind::Local) || kk <= 0 || assigns_var(lb, p) != 1 || lb[at + 1..].iter().any(|s| Stmt::uses_var(s, p)) {
                     continue;
                 }
                 // the counter steps after the pointer's reads
-                if inc_at.map_or(false, |ia| lb[ia..].iter().any(|s| crate::idioms::stmt_mentions(s, p) && !matches!(s, Stmt::Assign { dst: Expr::Var(x), .. } if *x == p))) {
+                if inc_at.is_some_and(|ia| lb[ia..].iter().any(|s| Stmt::uses_var(s, p) && !matches!(s, Stmt::Assign { dst: Expr::Var(x), .. } if *x == p))) {
                     continue;
                 }
                 found = Some((p, at, kk));
@@ -424,9 +417,9 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
             }
             let Some((p, at, kk)) = found else { continue };
             // set up from a base before the loop, not read after it
-            let Some(pi) = b[..k].iter().rposition(|s| crate::idioms::stmt_mentions(s, p)) else { continue };
+            let Some(pi) = b[..k].iter().rposition(|s| Stmt::uses_var(s, p)) else { continue };
             let Stmt::Assign { dst: Expr::Var(x), src: base } = &b[pi] else { continue };
-            if *x != p || base.uses_var(p) || b[k + 1..].iter().any(|s| crate::idioms::stmt_mentions(s, p)) {
+            if *x != p || base.uses_var(p) || b[k + 1..].iter().any(|s| Stmt::uses_var(s, p)) {
                 continue;
             }
             let mut base_vars = vec![];
@@ -451,7 +444,7 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                     reads += 1;
                 }
                 if let Expr::Load { base: lbase, offset, ty } = e {
-                    if matches!(uncast(lbase), Expr::Var(y) if *y == p) {
+                    if matches!(strip_casts(lbase), Expr::Var(y) if *y == p) {
                         loads += 1;
                         if !offs.contains(offset) {
                             offs.push(*offset);
@@ -488,7 +481,7 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                 };
                 Stmt::rewrite_exprs(lb, &mut |e| {
                     if let Expr::Load { base: lbase, offset: 0, .. } = &*e {
-                        if matches!(uncast(lbase), Expr::Var(y) if *y == p) {
+                        if matches!(strip_casts(lbase), Expr::Var(y) if *y == p) {
                             *e = Expr::Index { base: Box::new(ebase.clone()), index: Box::new(Expr::Var(i)), ty: ety.clone() };
                         }
                     }
@@ -501,7 +494,7 @@ pub fn pointer_walks(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                 let at_i = Expr::bin(BinOp::Add, Expr::cast(u8p.clone(), obj), Expr::bin(BinOp::Mul, Expr::Var(i), Expr::int(kk), t_s32()), u8p);
                 Stmt::rewrite_exprs(lb, &mut |e| {
                     if let Expr::Load { base: lbase, offset, ty } = &*e {
-                        if matches!(uncast(lbase), Expr::Var(y) if *y == p) {
+                        if matches!(strip_casts(lbase), Expr::Var(y) if *y == p) {
                             *e = Expr::Load { base: Box::new(at_i.clone()), offset: *offset + c, ty: ty.clone() };
                         }
                     }
@@ -539,13 +532,7 @@ pub fn invariant_reads(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool]) -> 
     let mut uses = std::collections::HashMap::new();
     crate::inline::count_uses(body, &mut uses);
     let mut defs: std::collections::HashMap<VarId, usize> = Default::default();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for s in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = s {
-                *defs.entry(*v).or_default() += 1;
-            }
-        }
-    });
+    crate::inline::count_defs(body, &mut defs);
     let pure = |e: &Expr| {
         let mut ok = !e.has_call();
         // (globals stay: a read of one can't be shown loop-invariant like a member's)
@@ -577,7 +564,7 @@ pub fn invariant_reads(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool]) -> 
                     && matches!(vars[t].kind, VarKind::Local)
                     && defs.get(&t) == Some(&1)
                     && uses.get(&t) == Some(&1)
-                    && crate::idioms::stmt_mentions(&b[k], t)
+                    && Stmt::uses_var(&b[k], t)
                     && pure(src)
                     && !src.uses_var(t)
                     // nothing it reads changes between it and the loop or inside the loop
@@ -622,7 +609,7 @@ pub fn invariant_reads(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool]) -> 
 /// reads `g[i][k]` (a byte-offset temp `t = i * 12` read only there goes). Every use of the global
 /// must be such a word read inside a row.
 pub fn pointer_global_rows(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&TypeDb>) {
-    let declared = |s: &str| db.map_or(false, |d| d.globals.contains_key(s));
+    let declared = |s: &str| db.is_some_and(|d| d.globals.contains_key(s));
     // single-definition locals defined as `i * K` (the shared byte offset)
     let mut defs: std::collections::HashMap<VarId, (usize, Option<Expr>)> = Default::default();
     Stmt::for_each_block_mut(body, &mut |b| {
@@ -635,7 +622,7 @@ pub fn pointer_global_rows(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&TypeD
         }
     });
     let scaled_of = |e: &Expr| -> Option<(Expr, i64)> {
-        match uncast(e) {
+        match strip_casts(e) {
             Expr::Var(v) if matches!(vars[*v].kind, VarKind::Local) => match defs.get(v) {
                 Some((1, Some(d))) => scaled(d),
                 _ => None,
@@ -645,8 +632,8 @@ pub fn pointer_global_rows(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&TypeD
     };
     // (global, index, row size) of a row address `g + off` / `(u8*)g + off`
     let row = |b: &Expr| -> Option<(String, Expr, i64)> {
-        let Expr::Binary { op: BinOp::Add, l, r, .. } = uncast(b) else { return None };
-        let Expr::Global { symbol, ty } = uncast(l) else { return None };
+        let Expr::Binary { op: BinOp::Add, l, r, .. } = strip_casts(b) else { return None };
+        let Expr::Global { symbol, ty } = strip_casts(l) else { return None };
         if declared(symbol) || scalar_size(ty) != Some(4) || is_ptr(ty) {
             return None;
         }
@@ -688,8 +675,8 @@ pub fn pointer_global_rows(body: &mut Vec<Stmt>, vars: &[Var], db: Option<&TypeD
         if chosen.get(&g) != Some(&k) {
             return;
         }
-        if let Expr::Binary { r, .. } = uncast(base) {
-            if let Expr::Var(t) = uncast(r) {
+        if let Expr::Binary { r, .. } = strip_casts(base) {
+            if let Expr::Var(t) = strip_casts(r) {
                 offset_temps.insert(*t);
             }
         }

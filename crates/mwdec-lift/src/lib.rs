@@ -169,7 +169,7 @@ fn return_class_from_returns(ir: &mut IrFunction) -> bool {
             let t = types::ty_of(e, &vars);
             seen = true;
             match (&cls, strip_cv(&t)) {
-                (_, mwdec_core::Type::Named(_)) if cls.as_ref().map_or(true, |c| c == strip_cv(&t)) => cls = Some(strip_cv(&t).clone()),
+                (_, mwdec_core::Type::Named(_)) if cls.as_ref().is_none_or(|c| c == strip_cv(&t)) => cls = Some(strip_cv(&t).clone()),
                 _ => ok = false,
             }
         }

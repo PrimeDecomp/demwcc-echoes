@@ -90,7 +90,7 @@ pub fn register_fixes(round: &ColorRound, moves: &[(u8, u8)]) -> Vec<RegisterFix
         v
     };
     for &(from, to) in moves {
-        for n in by_reg(from) {
+        if let Some(n) = by_reg(from).into_iter().next() {
             let holder = by_reg(to).into_iter().find(|h| h.neighbours.contains(&(n.vreg as i16)));
             let earlier = to > from; // higher register number = coloured earlier (r31 first)
             let s = if n.blocked {
@@ -150,7 +150,6 @@ pub fn register_fixes(round: &ColorRound, moves: &[(u8, u8)]) -> Vec<RegisterFix
                 holder: holder.map(|h| (h.vreg, h.name.clone(), h.kind)),
                 suggestion: s,
             });
-            break;
         }
     }
     out

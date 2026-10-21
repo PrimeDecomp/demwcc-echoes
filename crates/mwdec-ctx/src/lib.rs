@@ -548,7 +548,7 @@ fn nested_instances(db: &TypeDb, nested: &[(String, String)]) -> Vec<String> {
         for (b, n) in nested {
             if *b == base {
                 let full = format!("{cname}::{n}");
-                if !db.classes.get(&full).is_some_and(|k| !k.is_declaration) {
+                if db.classes.get(&full).is_none_or(|k| k.is_declaration) {
                     out.push(full);
                 }
             }

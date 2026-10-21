@@ -44,7 +44,7 @@ pub fn class_of<'a>(db: Option<&'a TypeDb>, t: &Type) -> Option<&'a Class> {
 pub fn is_enum(db: Option<&TypeDb>, t: &Type) -> bool {
     let r = resolve(db, t);
     match strip_cv(&r) {
-        Type::Named(n) => db.map_or(false, |db| db.enums.contains_key(n.as_str())),
+        Type::Named(n) => db.is_some_and(|db| db.enums.contains_key(n.as_str())),
         _ => false,
     }
 }
@@ -83,7 +83,7 @@ pub fn is_aggregate(db: Option<&TypeDb>, t: &Type) -> bool {
             }
             // Unknown named type: enums are `E...`-prefixed by project convention.
             let last = crate::sig::split_scope(n).1;
-            !(last.starts_with('E') && last.chars().nth(1).map_or(false, |c| c.is_ascii_uppercase()))
+            !(last.starts_with('E') && last.chars().nth(1).is_some_and(|c| c.is_ascii_uppercase()))
         }
         // arrays are never passed by value (they decay to pointers)
         Type::Array(..) => false,
@@ -277,7 +277,7 @@ fn bitfield_in(db: &TypeDb, c: &Class, off: i32, size: u32, mask: u32, depth: u3
             continue;
         }
         let shift_in_unit = unit * 8 - bit_off as u32 - bit_size as u32;
-        let fmask_unit: u64 = (((1u64 << bit_size) - 1) << shift_in_unit) as u64;
+        let fmask_unit: u64 = ((1u64 << bit_size) - 1) << shift_in_unit;
         // project to the access window
         let win_shift = (unit_lo + unit as i32 - (off + size as i32)) * 8;
         if win_shift < 0 {

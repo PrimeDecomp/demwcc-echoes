@@ -3,14 +3,15 @@
 //! member of such an object) with `sizeof(C)` equal to the slot is an object of class `C`, so
 //! the member-wise stores that build it can be folded into its constructor.
 
-use crate::util::{class_name, strip};
+use crate::util::class_name;
+use mwdec_lift::strip_cv;
 use mwdec_core::{Type, TypeDb};
 use mwdec_lift::{Callee, Expr, IrFunction, Stmt, Var, VarId, VarKind};
 use std::collections::HashMap;
 
 fn untyped_slot(vars: &[Var], v: VarId) -> Option<u32> {
     let var = vars.get(v)?;
-    match (&var.kind, strip(&var.ty)) {
+    match (&var.kind, strip_cv(&var.ty)) {
         (VarKind::Stack { .. }, Type::Unknown { size }) if *size > 0 => Some(*size),
         _ => None,
     }
@@ -20,7 +21,7 @@ fn untyped_slot(vars: &[Var], v: VarId) -> Option<u32> {
 /// the same size (`CToken` slot passed as `const TToken<CRasterFont>&`): the object is a `C`
 /// (identical layouts; the constructors that built it are `C`'s).
 fn base_typed_slot(vars: &[Var], v: VarId, c: &str, db: &TypeDb) -> Option<u32> {
-    if std::env::var("MWDI_NO_DERIVED_SLOTS").is_ok() {
+    if env_flag!("MWDI_NO_DERIVED_SLOTS") {
         return None;
     }
     let var = vars.get(v)?;
@@ -45,7 +46,7 @@ fn derives(db: &TypeDb, base: &str, derived: &str, d: u32) -> bool {
 
 /// Class pointed to by a pointer/reference parameter type.
 fn pointee_class(t: &Type, db: &TypeDb) -> Option<String> {
-    match strip(t) {
+    match strip_cv(t) {
         Type::Ptr(inner) | Type::Ref(inner) => class_name(inner, db),
         _ => None,
     }
@@ -64,7 +65,7 @@ pub fn type_object_slots(ir: &mut IrFunction, db: &TypeDb) -> usize {
             let mut e = e;
             loop {
                 match e {
-                    Expr::Cast { ty, e: x } if matches!(strip(ty), Type::Ptr(_)) => e = x,
+                    Expr::Cast { ty, e: x } if matches!(strip_cv(ty), Type::Ptr(_)) => e = x,
                     Expr::Load { base, offset: 0, .. } if matches!(&**base, Expr::Cast { .. }) => e = base,
                     _ => break,
                 }
@@ -123,7 +124,7 @@ pub fn type_object_slots(ir: &mut IrFunction, db: &TypeDb) -> usize {
         collect(&ir.body, &mut assigns);
         // an untyped slot copied member by member into a typed object of the same size (a
         // by-value result's temporary copied into the named local): the same class
-        if std::env::var("MWDI_NO_COPIED_SLOTS").is_err() {
+        if !env_flag!("MWDI_NO_COPIED_SLOTS") {
             fn slot_at(e: &Expr) -> Option<(VarId, i32)> {
                 match e {
                     Expr::Member { base, offset, .. } => match &**base {

@@ -359,7 +359,7 @@ pub fn word_class(w: u32) -> u32 {
         50 | 51 => DOUBLE | if ra == 1 { STACK } else { 0 },
         54 | 55 => CONV | if ra == 1 { STACK } else { 0 },
         59 => match xo5 {
-            28 | 29 | 30 | 31 => FMA,
+            28..=31 => FMA,
             25 | 21 | 20 => FMA,
             _ => 0,
         },

@@ -13,15 +13,6 @@ use std::collections::BTreeMap;
 
 
 
-fn split_of(unit: &str) -> &'static str {
-    let mut h: u32 = 0x811c9dc5;
-    for b in unit.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    if h % 10 < 7 { "train" } else { "test" }
-}
-
 fn main() -> anyhow::Result<()> {
     mwdec_core::memcap::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -50,7 +41,7 @@ fn main() -> anyhow::Result<()> {
         // only C++ game units compiled with 2.7 deferred,noauto (main + REL game code)
         let block_end = next_name.min(rest.len());
         let block = &rest[..block_end];
-        if block.contains("-lang=c++") && block.contains("deferred,noauto") && split_of(name) == "train" {
+        if block.contains("-lang=c++") && block.contains("deferred,noauto") && mwdec_core::split_of(name) == "train" {
             units.push((name.to_string(), target.to_string()));
         }
     }
@@ -60,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     let (mut blocked_ok, mut blocked_fail) = (0usize, 0usize);
     let mut param_ok_deg = 0usize;
     for (name, target) in units.iter().take(limit) {
-        let path = mwdec_core::paths::project_root().join(&target);
+        let path = mwdec_core::paths::project_root().join(target);
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(obj) = asm::parse(&bytes) else { continue };
         for f in &obj.funcs {

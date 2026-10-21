@@ -137,7 +137,7 @@ fn split_lvalue(e: &Expr) -> Option<(&Expr, i32, bool, &Type)> {
 thread_local! {
     /// Pairs (lower, upper) of word-sized data labels the splitter cut out of one 8-byte object
     /// (adjacent in one section of the target object), for the 64-bit merges.
-    static ADJACENT: std::cell::RefCell<Vec<(String, String)>> = std::cell::RefCell::new(vec![]);
+    static ADJACENT: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(vec![]) };
 }
 
 /// Set the adjacent word-label pairs of the current object (see [`merge_or_assigns`]).
@@ -236,7 +236,7 @@ pub fn merge_compares(body: &mut Vec<Stmt>, vars: &[Var]) {
 
 /// `LO = LO | (u32)x` / `HI = HI | (u32)(x >> 32)` on the two words of one object: the word's
 /// value or-ed with x (in place or through a temp `t = LO | (u32)x; HI = ..; LO = t;`).
-fn or_half<'a>(src: &'a Expr, dst: &Expr, vars: &[Var]) -> Option<(Expr, bool)> {
+fn or_half(src: &Expr, dst: &Expr, vars: &[Var]) -> Option<(Expr, bool)> {
     let Expr::Binary { op: BinOp::Or, l, r, .. } = src else { return None };
     if !same_lvalue(l, dst) {
         return None;
@@ -385,30 +385,7 @@ pub fn merge_halves(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool], params
     // single-assignment locals holding a half of a temp
     let mut assigns: HashMap<VarId, usize> = HashMap::new();
     let mut src_of: HashMap<VarId, Expr> = HashMap::new();
-    fn walk(b: &[Stmt], f: &mut dyn FnMut(&Stmt)) {
-        for s in b {
-            f(s);
-            match s {
-                Stmt::If { then, els, .. } => {
-                    walk(then, f);
-                    walk(els, f);
-                }
-                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => walk(body, f),
-                Stmt::For { init, step, body, .. } => {
-                    walk(init, f);
-                    walk(step, f);
-                    walk(body, f);
-                }
-                Stmt::Switch { cases, .. } => {
-                    for c in cases {
-                        walk(&c.body, f);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    walk(body, &mut |s| {
+    Stmt::each(body, &mut |s| {
         if let Stmt::Assign { dst: Expr::Var(v), src } = s {
             *assigns.entry(*v).or_default() += 1;
             src_of.insert(*v, src.clone());
@@ -419,7 +396,7 @@ pub fn merge_halves(body: &mut Vec<Stmt>, vars: &[Var], is_temp: &[bool], params
         .filter(|(v, e)| {
             assigns.get(v) == Some(&1)
                 && matches!(vars[*v].kind, VarKind::Local)
-                && (as_hi(e, vars).or_else(|| as_lo(e, vars))).map_or(false, |x| {
+                && (as_hi(e, vars).or_else(|| as_lo(e, vars))).is_some_and(|x| {
                     // a half of a temp, or of a 64-bit parameter never reassigned
                     matches!(x, Expr::Var(t) if is_temp.get(t).copied().unwrap_or(false) || (params && matches!(vars[t].kind, VarKind::Param { .. }) && !assigns.contains_key(&t)))
                 })

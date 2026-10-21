@@ -5,25 +5,13 @@
 //! compiler put a memory edge between them with whether the asm-level model says they may alias.
 //!
 //! usage: sched-alias-check [N=100] [seed=1] [-v] [--dwarf]
+use mwdec_oracle::testgen::Rng;
 use mwdec_oracle::asm;
 use mwdec_oracle::compile::Compiler;
 use mwdec_oracle::sched::EdgeKind;
 use mwdec_oracle::schedcheck::{frame_offsets, memory_dependent, stack_objects};
 use mwdec_oracle::tracer::{trace_source, TraceOptions};
 use std::collections::BTreeMap;
-
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
-    }
-}
 
 const PRELUDE: &str = "struct S { int a; int b; int c; };\nvoid use(S*);\nvoid usei(int*);\nint g1; int g2; S gs;\n";
 
@@ -99,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     let comp = Compiler::default();
     let mut csym = comp.clone();
     csym.extra.extend(["-sym".to_string(), "on".to_string()]);
-    let mut r = Rng(0x9E3779B97F4A7C15 ^ seed.wrapping_mul(0x2545F4914F6CDD1D));
+    let mut r = Rng::seeded(seed);
     let mut tally: BTreeMap<(bool, bool), usize> = BTreeMap::new();
     let mut examples: BTreeMap<(bool, bool), Vec<String>> = BTreeMap::new();
     let mut unaligned = 0;

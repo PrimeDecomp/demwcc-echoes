@@ -7,7 +7,7 @@
 //! {best, initial}. Operator weights = base x diff-category multiplier (from the parent's diff
 //! profile) x adaptive success rate. Stops on exact, time budget, or compile budget.
 use crate::cst::normalize;
-use crate::ops::{self, Cat, OPS};
+use crate::ops::{self, OPS};
 use crate::rng::Rng;
 use crate::score::{DiffProfile, Eval, Fitness, Scorer};
 use serde::Serialize;
@@ -273,44 +273,6 @@ pub fn affinity_mult(p: &DiffProfile, aff: u8) -> f64 {
     }
     let share: f64 = f.iter().filter(|x| aff & x.0 != 0).map(|x| x.1 as f64).sum::<f64>() / tot as f64;
     0.3 + 3.0 * share
-}
-
-/// Category multipliers from what differs (coarse; superseded by [`affinity_mult`]).
-pub fn category_mult(p: &DiffProfile) -> impl Fn(Cat) -> f64 {
-    let structural = p.inserted + p.deleted + p.substituted;
-    let reorder = p.reorder;
-    let regish = p.reg + p.stack;
-    let branch = p.branch;
-    move |c: Cat| {
-        let mut m = 1.0;
-        if structural > 0 {
-            m *= match c {
-                Cat::Types => 2.0,
-                Cat::Control => 2.0,
-                Cat::Temp => 1.5,
-                Cat::Expr => 1.3,
-                Cat::Order => 0.7,
-            };
-        } else if reorder > 0 {
-            m *= match c {
-                Cat::Order => 2.5,
-                Cat::Temp => 1.5,
-                Cat::Expr => 1.5,
-                _ => 0.8,
-            };
-        } else if regish > 0 {
-            m *= match c {
-                Cat::Order => 3.0,
-                Cat::Temp => 2.0,
-                Cat::Expr => 1.5,
-                _ => 0.5,
-            };
-        }
-        if branch > 0 && c == Cat::Control {
-            m *= 1.5;
-        }
-        m
-    }
 }
 
 impl State {
@@ -871,7 +833,7 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                         }
                     }
                     let cand = Cand::with_hash(Arc::new(src), fit.clone(), h);
-                    let strictly = g.best.as_ref().map_or(true, |b| fit.better_than(&b.fit));
+                    let strictly = g.best.as_ref().is_none_or(|b| fit.better_than(&b.fit));
                     if !strictly && g.best.as_ref().is_some_and(|b| cand.better_than(b)) {
                         // Same fitness, simpler source: keep as best without resetting stagnation.
                         save(cfg, &cand, "", scorer.objdiff_percent(&cand.src));

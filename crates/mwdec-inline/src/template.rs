@@ -2,6 +2,7 @@
 
 use crate::probe::{CallKind, Probe};
 use crate::util::*;
+use mwdec_lift::strip_cv;
 use mwdec_core::{FuncSig, Type, TypeDb};
 use mwdec_lift::{Expr, IrFunction, Stmt, VarId, VarKind};
 use std::collections::HashMap;
@@ -63,7 +64,7 @@ pub struct Template {
 }
 
 pub fn hole_kind(t: &Type, db: &TypeDb) -> HoleKind {
-    let s = strip(t);
+    let s = strip_cv(t);
     match s {
         Type::Ptr(inner) | Type::Ref(inner) => {
             let is_ptr = matches!(s, Type::Ptr(_));
@@ -71,8 +72,8 @@ pub fn hole_kind(t: &Type, db: &TypeDb) -> HoleKind {
             if let Some(c) = class_name(inner, db) {
                 return HoleKind::Obj { class: c, ptr: is_ptr, temp_ok: !is_ptr && is_const };
             }
-            let scalar = mwdec_lift::scalar_size(strip(inner)).is_some() || mwdec_lift::types::is_enum(Some(db), strip(inner));
-            if !is_ptr && scalar && !matches!(strip(inner), Type::Unknown { .. }) {
+            let scalar = mwdec_lift::scalar_size(strip_cv(inner)).is_some() || mwdec_lift::types::is_enum(Some(db), strip_cv(inner));
+            if !is_ptr && scalar && !matches!(strip_cv(inner), Type::Unknown { .. }) {
                 return HoleKind::ScalarRef((**inner).clone());
             }
             HoleKind::Scalar(t.clone())
@@ -200,7 +201,7 @@ pub fn flat_fields(db: &TypeDb, cls: &str) -> Option<Vec<(i32, Type)>> {
     flat_into(db, cls, 0, &mut v, 0)?;
     // members overlaid by an anonymous union (`CColor`: mR..mA bytes over `uint mRgba`): the
     // widest member covering the others is the object's component
-    if std::env::var("MWDI_NO_UNION_FLAT").is_err() {
+    if !env_flag!("MWDI_NO_UNION_FLAT") {
         let size = |t: &Type| mwdec_lift::types::size_of(Some(db), t).unwrap_or(0) as i32;
         let spans: Vec<(i32, i32)> = v.iter().map(|(o, t)| (*o, *o + size(t))).collect();
         let keep: Vec<bool> = (0..v.len())
@@ -232,7 +233,7 @@ fn flat_into(db: &TypeDb, cls: &str, base: i32, out: &mut Vec<(i32, Type)>, dept
             return None;
         }
         let rt = mwdec_lift::types::resolve(Some(db), &f.ty).into_owned();
-        match strip(&rt) {
+        match strip_cv(&rt) {
             Type::Array(e, n) => {
                 let es = mwdec_lift::types::size_of(Some(db), e)?;
                 if mwdec_lift::types::is_aggregate(Some(db), e) {
@@ -336,8 +337,8 @@ fn from_probe_expr(p: &Probe, ir: &IrFunction, db: &TypeDb) -> Result<Template, 
     let sret = ir.vars.iter().position(|v| v.kind == VarKind::StructRet);
     let ret_class = class_name(&p.ret, db);
     let shape = match (&body[..], &ret_class) {
-        ([Stmt::Return(Some(e))], Some(c)) if !matches!(strip(&p.ret), Type::Ptr(_)) => {
-            if std::env::var("MWDI_TRACE_TPL").is_ok_and(|f| p.sig.qualified_name.contains(f.as_str())) {
+        ([Stmt::Return(Some(e))], Some(c)) if !matches!(strip_cv(&p.ret), Type::Ptr(_)) => {
+            if env_value!("MWDI_TRACE_TPL").is_some_and(|f| p.sig.qualified_name.contains(f)) {
                 eprintln!("TPL {} object return: {e:?}", p.sig.qualified_name);
             }
             match object_comps(e, c, db) {
@@ -347,7 +348,7 @@ fn from_probe_expr(p: &Probe, ir: &IrFunction, db: &TypeDb) -> Result<Template, 
                 }
                 // an object built by its out-of-line constructor (`return CCharAnimTime(mMaxTime);`):
                 // the construction itself is the value
-                None if matches!(e, Expr::Construct { ctor: Some(cs), .. } if cs.mangled.is_some()) && std::env::var_os("MWDI_NO_CTOR_RETURNS").is_none() => Shape::Scalar(to_holes(e, &map).ok_or("free vars")?),
+                None if matches!(e, Expr::Construct { ctor: Some(cs), .. } if cs.mangled.is_some()) && !env_flag!("MWDI_NO_CTOR_RETURNS") => Shape::Scalar(to_holes(e, &map).ok_or("free vars")?),
                 None => return Err("object return form".into()),
             }
         }
@@ -367,7 +368,7 @@ fn from_probe_expr(p: &Probe, ir: &IrFunction, db: &TypeDb) -> Result<Template, 
                             Expr::Var(v) if map.contains_key(v) => Some(map[v]),
                             _ => return Err("store base".into()),
                         };
-                        if target.map_or(false, |x| x != t) {
+                        if target.is_some_and(|x| x != t) {
                             return Err("stores to two objects".into());
                         }
                         target = Some(t);
@@ -426,7 +427,7 @@ fn from_cflow_probe(p: &Probe, ir: &IrFunction, db: &TypeDb) -> Result<Template,
     for (i, v) in ir.params.iter().enumerate() {
         map.insert(*v, i);
     }
-    if ir.params.len() != p.params.len() || class_name(&p.ret, db).is_some() && !matches!(strip(&p.ret), Type::Ptr(_)) {
+    if ir.params.len() != p.params.len() || class_name(&p.ret, db).is_some() && !matches!(strip_cv(&p.ret), Type::Ptr(_)) {
         return Err("control flow object".into());
     }
     let mut e = to_holes(&ret, &map).ok_or("free vars")?;

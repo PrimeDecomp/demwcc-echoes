@@ -6,6 +6,7 @@
 
 use crate::matcher::{build_defs, explain_object, Env, Index};
 use crate::util::*;
+use mwdec_lift::strip_cv;
 use crate::InlineLib;
 use mwdec_core::{Type, TypeDb};
 use mwdec_lift::{Expr, IrFunction, Stmt, Var};
@@ -49,8 +50,8 @@ fn guard(s: &Stmt) -> Option<(String, String, u32, BTreeMap<i32, Expr>)> {
     for st in stores {
         let Stmt::Assign { dst: Expr::Member { base, offset, .. }, src } = st else { return None };
         let Expr::Global { symbol, ty } = &**base else { return None };
-        let size = match strip(ty) {
-            Type::Unknown { size } => *size as u32,
+        let size = match strip_cv(ty) {
+            Type::Unknown { size } => *size,
             _ => return None,
         };
         match &obj {
@@ -64,30 +65,6 @@ fn guard(s: &Stmt) -> Option<(String, String, u32, BTreeMap<i32, Expr>)> {
     }
     let (obj, size) = obj?;
     local_static(&obj).then_some((flag, obj, size, m))
-}
-
-fn each_stmt(b: &[Stmt], f: &mut dyn FnMut(&Stmt)) {
-    for s in b {
-        f(s);
-        match s {
-            Stmt::If { then, els, .. } => {
-                each_stmt(then, f);
-                each_stmt(els, f);
-            }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => each_stmt(body, f),
-            Stmt::For { init, step, body, .. } => {
-                each_stmt(init, f);
-                each_stmt(step, f);
-                each_stmt(body, f);
-            }
-            Stmt::Switch { cases, .. } => {
-                for c in cases {
-                    each_stmt(&c.body, f);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 /// A class-typed field (at any depth) of `cls` starting at `off` with a class of `size` bytes.
@@ -122,7 +99,7 @@ fn field_class_at(db: &TypeDb, cls: &str, off: i32, size: u32, depth: u32) -> Op
 /// object's size) receiving the object's members at their own offsets.
 fn class_of_use(body: &[Stmt], obj: &str, size: u32, vars: &[Var], db: &TypeDb) -> Option<String> {
     let mut found: Option<String> = None;
-    each_stmt(body, &mut |s| {
+    Stmt::each(body, &mut |s| {
         if found.is_some() {
             return;
         }
@@ -138,7 +115,7 @@ fn class_of_use(body: &[Stmt], obj: &str, size: u32, vars: &[Var], db: &TypeDb) 
             Expr::Var(v) => vars[*v].ty.clone(),
             _ => return,
         };
-        let Some(outer) = mwdec_lift::pointee(strip(&bt)).and_then(|t| class_name(t, db)) else { return };
+        let Some(outer) = mwdec_lift::pointee(strip_cv(&bt)).and_then(|t| class_name(t, db)) else { return };
         found = field_class_at(db, &outer, k - so, size, 0);
     });
     let cls = found?;
@@ -146,7 +123,7 @@ fn class_of_use(body: &[Stmt], obj: &str, size: u32, vars: &[Var], db: &TypeDb) 
 }
 
 pub fn apply(ir: &mut IrFunction, lib: &InlineLib, db: &TypeDb, idx: &Index) -> usize {
-    if std::env::var_os("MWDI_NO_STATIC_CTORS").is_some() {
+    if env_flag!("MWDI_NO_STATIC_CTORS") {
         return 0;
     }
     let mut n = 0;

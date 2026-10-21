@@ -143,7 +143,7 @@ pub fn decl_relevant(class: Option<&str>, params: &[mwdec_core::Param], ret: &Ty
 /// Simple accessors/setters the emitter already renders (`return mX ;`, `mX = x ;`).
 pub fn trivial_body(body: &str) -> bool {
     let t: Vec<&str> = body.split_whitespace().collect();
-    let ident = |s: &str| s.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let ident = |s: &str| s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && s.chars().all(|c| c.is_alphanumeric() || c == '_');
     match t.as_slice() {
         ["return", a, ";"] => ident(a),
         ["return", "&", a, ";"] => ident(a),

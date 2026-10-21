@@ -1,6 +1,6 @@
 //! Instruction decoding helpers: register model and per-instruction defs/uses.
 
-use mwdec_core::{Reloc, RelocKind};
+use mwdec_core::Reloc;
 use ppc750cl::{Ins, Opcode};
 
 /// Register index: GPRs 0..32, FPRs 32..64, CR fields 64..72, CTR 72, LR 73, XER.CA 74.
@@ -65,9 +65,6 @@ impl Insn {
     }
     pub fn text(&self) -> String {
         format!("{}", self.ins.simplified())
-    }
-    pub fn reloc_kind(&self) -> Option<RelocKind> {
-        self.reloc.as_ref().map(|r| r.kind)
     }
     /// `bl` (call) with a REL24 relocation.
     pub fn is_call(&self) -> bool {

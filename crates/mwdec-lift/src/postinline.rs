@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// A call that stands for an inline expansion (built after lifting: no symbol of its own).
 pub fn is_inline_call(e: &Expr) -> bool {
     match e {
-        Expr::Call { callee: Callee::Direct { symbol, sig }, .. } => *symbol == sig.qualified_name && sig.mangled.as_deref().map_or(true, |m| m != symbol),
+        Expr::Call { callee: Callee::Direct { symbol, sig }, .. } => *symbol == sig.qualified_name && sig.mangled.as_deref().is_none_or(|m| m != symbol),
         Expr::Call { callee: Callee::Method { symbol, .. }, .. } => symbol.is_empty(),
         _ => false,
     }
@@ -19,18 +19,6 @@ fn is_plain_inline_call(e: &Expr) -> bool {
         Expr::Call { callee: Callee::Direct { sig, .. } | Callee::Method { sig, .. }, .. } => is_inline_call(e) && !sig.qualified_name.contains("operator"),
         _ => false,
     }
-}
-
-fn count_defs(body: &mut Vec<Stmt>) -> HashMap<VarId, usize> {
-    let mut n: HashMap<VarId, usize> = HashMap::new();
-    Stmt::for_each_block_mut(body, &mut |b| {
-        for s in b.iter() {
-            if let Stmt::Assign { dst: Expr::Var(v), .. } = s {
-                *n.entry(*v).or_default() += 1;
-            }
-        }
-    });
-    n
 }
 
 /// Does `e` contain a call other than inline expansions?
@@ -93,12 +81,6 @@ fn subst_inline_arg(e: &mut Expr, v: VarId, val: &Expr) -> bool {
 /// `v[i]` (its `operator[]`). Written as a pointer walk, MWCC unrolls the loop; the source indexed
 /// the container. Returns the number of loops rewritten.
 pub fn container_index_walks(body: &mut Vec<Stmt>, _vars: &[Var], db: Option<&mwdec_core::TypeDb>) -> usize {
-    fn uncast(e: &Expr) -> &Expr {
-        match e {
-            Expr::Cast { e, .. } => uncast(e),
-            e => e,
-        }
-    }
     let mut uses: HashMap<VarId, usize> = HashMap::new();
     crate::inline::count_uses(body, &mut uses);
     let mut n = 0;
@@ -113,13 +95,13 @@ pub fn container_index_walks(body: &mut Vec<Stmt>, _vars: &[Var], db: Option<&mw
                     return None;
                 }
                 let Expr::Binary { op: BinOp::Lt, l, .. } = cond else { return None };
-                if !matches!(uncast(l), Expr::Var(x) if *x == i) || step.len() != 1 {
+                if !matches!(strip_casts(l), Expr::Var(x) if *x == i) || step.len() != 1 {
                     return None;
                 }
                 // the walk's start right before the loop: `p = (cast)container.data()`
                 let Stmt::Assign { dst: Expr::Var(p), src: ps } = &b[k - 1] else { return None };
                 let p = *p;
-                let Expr::Call { callee: Callee::Method { this, sig, .. }, args, ret } = uncast(ps) else { return None };
+                let Expr::Call { callee: Callee::Method { this, sig, .. }, args, ret } = strip_casts(ps) else { return None };
                 if !args.is_empty() || !sig.qualified_name.ends_with("::data") {
                     return None;
                 }
@@ -136,9 +118,9 @@ pub fn container_index_walks(body: &mut Vec<Stmt>, _vars: &[Var], db: Option<&mw
                 // its only step, last in the body: `p = p + size`
                 let (last, rest) = lb.split_last()?;
                 let Stmt::Assign { dst: Expr::Var(q), src: qs } = last else { return None };
-                let stepped = match uncast(qs) {
-                    Expr::Binary { op: BinOp::Add, l, r, .. } => matches!(uncast(l), Expr::Var(x) if *x == p) && r.as_int() == Some(size),
-                    Expr::AddrOf(x) => matches!(&**x, Expr::Load { base, offset, .. } if matches!(uncast(base), Expr::Var(y) if *y == p) && *offset as i64 == size),
+                let stepped = match strip_casts(qs) {
+                    Expr::Binary { op: BinOp::Add, l, r, .. } => matches!(strip_casts(l), Expr::Var(x) if *x == p) && r.as_int() == Some(size),
+                    Expr::AddrOf(x) => matches!(&**x, Expr::Load { base, offset, .. } if matches!(strip_casts(base), Expr::Var(y) if *y == p) && *offset as i64 == size),
                     _ => false,
                 };
                 if *q != p || !stepped {
@@ -226,7 +208,8 @@ pub fn container_index_walks(body: &mut Vec<Stmt>, _vars: &[Var], db: Option<&mw
 }
 
 pub fn forward_inline_args(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
-    let defs = count_defs(body);
+    let mut defs = HashMap::new();
+    crate::inline::count_defs(body, &mut defs);
     let mut uses = HashMap::new();
     crate::inline::count_uses(body, &mut uses);
     let mut n = 0;
@@ -237,13 +220,13 @@ pub fn forward_inline_args(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
             if let Stmt::Assign { dst: Expr::Var(v), src } = &b[i] {
                 // the next statement reading v, past assignments that can't change `e`
                 let mut j = i + 1;
-                while j < b.len() && j <= i + 4 && !crate::idioms::stmt_mentions(&b[j], *v) {
+                while j < b.len() && j <= i + 4 && !Stmt::uses_var(&b[j], *v) {
                     match &b[j] {
                         Stmt::Assign { dst: Expr::Var(w), src: s } if !src.uses_var(*w) && !has_real_call(s) => j += 1,
                         _ => break,
                     }
                 }
-                if j < b.len() && crate::idioms::stmt_mentions(&b[j], *v) {
+                if j < b.len() && Stmt::uses_var(&b[j], *v) {
                     // read only there: the only def and use, or that statement redefines it from
                     // its single read (`v = e; v = inl(.., v, ..)`)
                     let only_here = defs.get(v) == Some(&1) && uses.get(v) == Some(&1);
@@ -255,7 +238,7 @@ pub fn forward_inline_args(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
                     // a value merged with the inline's result (several definitions when lifted,
                     // `var_`) or the variable the result goes back to; a single-definition temp
                     // the lifter kept apart was a variable of its own
-                    let merged = vars.get(*v).map_or(false, |x| x.name.starts_with("var_"));
+                    let merged = vars.get(*v).is_some_and(|x| x.name.starts_with("var_"));
                     let ok = matches!(vars.get(*v).map(|x| &x.kind), Some(VarKind::Local))
                         // (past other assignments only when the use redefines it)
                         && ((only_here && merged && j == i + 1) || redefined)
@@ -371,7 +354,8 @@ pub fn split_last_field(body: &mut Vec<Stmt>, vars: &[Var]) -> usize {
 /// declared) become `const bool`, and a returned `&&`/`||` chain is returned through one
 /// (`const bool r = a || b; return r;`). The compiler re-extends a const bool at each use.
 pub fn const_bool_locals(body: &mut Vec<Stmt>, vars: &mut Vec<Var>, ret_bool: bool) -> usize {
-    let defs = count_defs(body);
+    let mut defs = HashMap::new();
+    crate::inline::count_defs(body, &mut defs);
     let decl_here = crate::idioms::decl_at_first_def_scalars(body, vars);
     let locals: Vec<VarId> = (0..vars.len())
         .filter(|&v| {

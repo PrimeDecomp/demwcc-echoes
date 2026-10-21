@@ -15,23 +15,16 @@
 
 use crate::ir::*;
 
-fn strip(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip(e),
-        e => e,
-    }
-}
-
 fn is_int(e: &Expr, k: i64) -> bool {
-    strip(e).as_int() == Some(k)
+    strip_casts(e).as_int() == Some(k)
 }
 
 /// `v = v - 1` / `v = v + -1`
 fn is_dec(s: &Stmt, v: VarId) -> bool {
     match s {
-        Stmt::Assign { dst: Expr::Var(x), src } if *x == v => match strip(src) {
-            Expr::Binary { op: BinOp::Sub, l, r, .. } => matches!(strip(l), Expr::Var(y) if *y == v) && is_int(r, 1),
-            Expr::Binary { op: BinOp::Add, l, r, .. } => matches!(strip(l), Expr::Var(y) if *y == v) && is_int(r, -1),
+        Stmt::Assign { dst: Expr::Var(x), src } if *x == v => match strip_casts(src) {
+            Expr::Binary { op: BinOp::Sub, l, r, .. } => matches!(strip_casts(l), Expr::Var(y) if *y == v) && is_int(r, 1),
+            Expr::Binary { op: BinOp::Add, l, r, .. } => matches!(strip_casts(l), Expr::Var(y) if *y == v) && is_int(r, -1),
             _ => false,
         },
         _ => false,
@@ -41,14 +34,14 @@ fn is_dec(s: &Stmt, v: VarId) -> bool {
 /// `do { body; c = c - 1; } while (c != 0)` -> (c, body)
 fn ctr_loop(s: &Stmt) -> Option<(VarId, Vec<Stmt>)> {
     let Stmt::DoWhile { body, cond } = s else { return None };
-    let Expr::Binary { op: BinOp::Ne, l, r, .. } = strip(cond) else { return None };
-    let Expr::Var(c) = strip(l) else { return None };
+    let Expr::Binary { op: BinOp::Ne, l, r, .. } = strip_casts(cond) else { return None };
+    let Expr::Var(c) = strip_casts(l) else { return None };
     if !is_int(r, 0) {
         return None;
     }
     let real: Vec<Stmt> = body.iter().filter(|s| !matches!(s, Stmt::Label(_))).cloned().collect();
     let (last, rest) = real.split_last()?;
-    if !is_dec(last, *c) || rest.iter().any(|s| crate::idioms::stmt_mentions(s, *c)) {
+    if !is_dec(last, *c) || rest.iter().any(|s| Stmt::uses_var(s, *c)) {
         return None;
     }
     Some((*c, rest.to_vec()))
@@ -60,8 +53,8 @@ fn real(b: &[Stmt]) -> Vec<&Stmt> {
 
 /// `a op b` with operands compared after stripping casts.
 fn cmp_parts(e: &Expr) -> Option<(BinOp, &Expr, &Expr)> {
-    match strip(e) {
-        Expr::Binary { op, l, r, .. } if op.is_cmp() => Some((*op, strip(l), strip(r))),
+    match strip_casts(e) {
+        Expr::Binary { op, l, r, .. } if op.is_cmp() => Some((*op, strip_casts(l), strip_casts(r))),
         _ => None,
     }
 }
@@ -123,8 +116,8 @@ fn shape_a(b: &[Stmt], k: usize) -> Option<(VarId, Expr, Vec<Stmt>)> {
     // pointer walks of the remainder are the index again
     subst_pointer_walks(&mut body1, &ptrs, *i)?;
     // ctr2 = n - i
-    match strip(c2src) {
-        Expr::Binary { op: BinOp::Sub, l, r, .. } if strip(l) == n && matches!(strip(r), Expr::Var(x) if x == i) => {}
+    match strip_casts(c2src) {
+        Expr::Binary { op: BinOp::Sub, l, r, .. } if strip_casts(l) == n && matches!(strip_casts(r), Expr::Var(x) if x == i) => {}
         _ => return None,
     }
     // unrolled part: if (n > 8) { ctr = ...; if (t > 0) do { i += 8; BODYx8; ctr--; } while (ctr); }
@@ -142,7 +135,7 @@ fn shape_a(b: &[Stmt], k: usize) -> Option<(VarId, Expr, Vec<Stmt>)> {
     let (_, body8) = ctr_loop(uloop)?;
     let steps8 = body8
         .iter()
-        .any(|s| matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip(l), Expr::Var(y) if y == i) && is_int(r, 8))));
+        .any(|s| matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip_casts(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if y == i) && is_int(r, 8))));
     if !steps8 {
         return None;
     }
@@ -168,7 +161,7 @@ fn shape_a_formed(t: &[&Stmt], n: &Expr) -> Option<(VarId, Expr, Vec<Stmt>)> {
     }
     let steps1 = match step.as_slice() {
         [Stmt::Expr(Expr::IncDec { e, delta: 1, .. })] => matches!(&**e, Expr::Var(x) if x == i),
-        [s] => matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip(l), Expr::Var(y) if y == i) && is_int(r, 1))),
+        [s] => matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip_casts(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if y == i) && is_int(r, 1))),
         _ => false,
     };
     if !steps1 {
@@ -192,7 +185,7 @@ fn shape_a_formed(t: &[&Stmt], n: &Expr) -> Option<(VarId, Expr, Vec<Stmt>)> {
     let (_, body8) = ctr_loop(uloop)?;
     let steps8 = body8
         .iter()
-        .any(|s| matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip(l), Expr::Var(y) if y == i) && is_int(r, 8))));
+        .any(|s| matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip_casts(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if y == i) && is_int(r, 8))));
     if !steps8 || t[..m - 2].iter().any(|s| !matches!(s, Stmt::Assign { dst: Expr::Var(_), .. })) {
         return None;
     }
@@ -201,10 +194,10 @@ fn shape_a_formed(t: &[&Stmt], n: &Expr) -> Option<(VarId, Expr, Vec<Stmt>)> {
 
 /// `p + k` written as an add or as `&p->field` (`&*(p + k)`).
 fn step_of(src: &Expr, p: VarId) -> Option<i64> {
-    match strip(src) {
-        Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip(l), Expr::Var(y) if *y == p) => r.as_int(),
+    match strip_casts(src) {
+        Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if *y == p) => r.as_int(),
         Expr::AddrOf(x) => match &**x {
-            Expr::Load { base, offset, .. } if matches!(strip(base), Expr::Var(y) if *y == p) => Some(*offset as i64),
+            Expr::Load { base, offset, .. } if matches!(strip_casts(base), Expr::Var(y) if *y == p) => Some(*offset as i64),
             _ => None,
         },
         _ => None,
@@ -213,10 +206,10 @@ fn step_of(src: &Expr, p: VarId) -> Option<i64> {
 
 /// Bytes per unit of `i` in an index expression (`i`, `i * c`, `i << s`).
 fn index_coef(e: &Expr, i: VarId) -> Option<i64> {
-    match strip(e) {
+    match strip_casts(e) {
         Expr::Var(x) if *x == i => Some(1),
-        Expr::Binary { op: BinOp::Mul, l, r, .. } if matches!(strip(l), Expr::Var(x) if *x == i) => r.as_int(),
-        Expr::Binary { op: BinOp::Shl, l, r, .. } if matches!(strip(l), Expr::Var(x) if *x == i) => r.as_int().filter(|s| (0..16).contains(s)).map(|s| 1 << s),
+        Expr::Binary { op: BinOp::Mul, l, r, .. } if matches!(strip_casts(l), Expr::Var(x) if *x == i) => r.as_int(),
+        Expr::Binary { op: BinOp::Shl, l, r, .. } if matches!(strip_casts(l), Expr::Var(x) if *x == i) => r.as_int().filter(|s| (0..16).contains(s)).map(|s| 1 << s),
         _ => None,
     }
 }
@@ -226,7 +219,7 @@ fn index_coef(e: &Expr, i: VarId) -> Option<i64> {
 fn subst_pointer_walks(body1: &mut Vec<Stmt>, ptrs: &[(VarId, Expr)], i: VarId) -> Option<()> {
     for (p, init) in ptrs {
         // bytes the pointer moves per unit of i
-        let coef = match strip(init) {
+        let coef = match strip_casts(init) {
             Expr::Binary { op: BinOp::Add, r, .. } => index_coef(r, i)?,
             Expr::AddrOf(x) => match &**x {
                 Expr::Index { index, ty, .. } => index_coef(index, i)? * scalar_size(ty)? as i64,
@@ -243,7 +236,7 @@ fn subst_pointer_walks(body1: &mut Vec<Stmt>, ptrs: &[(VarId, Expr)], i: VarId) 
             return None;
         }
         // the step is the iteration's last use of p
-        if body1[*st + 1..].iter().any(|s| crate::idioms::stmt_mentions(s, *p)) {
+        if body1[*st + 1..].iter().any(|s| Stmt::uses_var(s, *p)) {
             return None;
         }
         body1.remove(*st);
@@ -263,25 +256,25 @@ fn subst_pointer_walks(body1: &mut Vec<Stmt>, ptrs: &[(VarId, Expr)], i: VarId) 
 fn shape_a_const(b: &[Stmt], k: usize) -> Option<(usize, usize, usize, VarId, i64, i64, Vec<Stmt>)> {
     let (c, body8) = ctr_loop(b.get(k)?)?;
     // the main loop's counter starts at a constant
-    let ic = (0..k).rev().find(|&j| crate::idioms::stmt_mentions(&b[j], c))?;
+    let ic = (0..k).rev().find(|&j| Stmt::uses_var(&b[j], c))?;
     let kk = match &b[ic] {
-        Stmt::Assign { dst: Expr::Var(x), src } if *x == c => strip(src).as_int()?,
+        Stmt::Assign { dst: Expr::Var(x), src } if *x == c => strip_casts(src).as_int()?,
         _ => return None,
     };
     // pointer setups, ctr2 = N - i, if (i < N) do { BODY } while (ctr2)
     let mut q = k + 1;
     let mut ptrs: Vec<(VarId, Expr)> = vec![];
     while let Some(Stmt::Assign { dst: Expr::Var(p), src }) = b.get(q) {
-        if matches!(strip(src), Expr::Binary { op: BinOp::Sub, l, .. } if strip(l).as_int().is_some()) {
+        if matches!(strip_casts(src), Expr::Binary { op: BinOp::Sub, l, .. } if strip_casts(l).as_int().is_some()) {
             break;
         }
         ptrs.push((*p, src.clone()));
         q += 1;
     }
     let Stmt::Assign { dst: Expr::Var(c2), src: c2src } = b.get(q)? else { return None };
-    let Expr::Binary { op: BinOp::Sub, l: nn, r: ii, .. } = strip(c2src) else { return None };
-    let n = strip(nn).as_int()?;
-    let Expr::Var(i) = strip(ii) else { return None };
+    let Expr::Binary { op: BinOp::Sub, l: nn, r: ii, .. } = strip_casts(c2src) else { return None };
+    let n = strip_casts(nn).as_int()?;
+    let Expr::Var(i) = strip_casts(ii) else { return None };
     let Stmt::If { cond, then, els } = b.get(q + 1)? else { return None };
     if !els.is_empty() {
         return None;
@@ -297,14 +290,14 @@ fn shape_a_const(b: &[Stmt], k: usize) -> Option<(usize, usize, usize, VarId, i6
         return None;
     }
     // the main loop steps i by 8
-    let steps8 = body8.iter().any(|s| matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip(l), Expr::Var(y) if y == i) && is_int(r, 8))));
+    let steps8 = body8.iter().any(|s| matches!(s, Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip_casts(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if y == i) && is_int(r, 8))));
     if !steps8 {
         return None;
     }
     // i starts at a constant a with N - a = 8 K + r, 0 < r < 8
-    let ii0 = (0..k).rev().find(|&j| j != ic && crate::idioms::stmt_mentions(&b[j], *i))?;
+    let ii0 = (0..k).rev().find(|&j| j != ic && Stmt::uses_var(&b[j], *i))?;
     let a = match &b[ii0] {
-        Stmt::Assign { dst: Expr::Var(x), src } if x == i => strip(src).as_int()?,
+        Stmt::Assign { dst: Expr::Var(x), src } if x == i => strip_casts(src).as_int()?,
         _ => return None,
     };
     let r = n - a - 8 * kk;
@@ -313,9 +306,9 @@ fn shape_a_const(b: &[Stmt], k: usize) -> Option<(usize, usize, usize, VarId, i6
     }
     subst_pointer_walks(&mut body1, &ptrs, *i)?;
     // the remainder steps i itself (it is read after the loop): the for's step does
-    let inc: Vec<usize> = (0..body1.len()).filter(|&j| matches!(&body1[j], Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip(l), Expr::Var(y) if y == i) && is_int(r, 1)))).collect();
+    let inc: Vec<usize> = (0..body1.len()).filter(|&j| matches!(&body1[j], Stmt::Assign { dst: Expr::Var(x), src } if x == i && matches!(strip_casts(src), Expr::Binary { op: BinOp::Add, l, r, .. } if matches!(strip_casts(l), Expr::Var(y) if y == i) && is_int(r, 1)))).collect();
     match inc.as_slice() {
-        [j] if !body1[j + 1..].iter().any(|s| crate::idioms::stmt_mentions(s, *i)) => {
+        [j] if !body1[j + 1..].iter().any(|s| Stmt::uses_var(s, *i)) => {
             body1.remove(*j);
         }
         [] => {}
@@ -343,10 +336,10 @@ pub fn reroll_const(body: &mut Vec<Stmt>) {
                 // statements between the inits and the main loop stay before the for
                 let first = ic.min(ii0);
                 // (the main loop's own pointers, now unused, go too)
-                let mentioned_after = |x: VarId, b: &Vec<Stmt>| b[last + 1..].iter().any(|s| crate::idioms::stmt_mentions(s, x)) || crate::idioms::stmt_mentions(&f, x);
+                let mentioned_after = |x: VarId, b: &Vec<Stmt>| b[last + 1..].iter().any(|s| Stmt::uses_var(s, x)) || Stmt::uses_var(&f, x);
                 let keep: Vec<Stmt> = (first..k)
                     .filter(|&j| j != ic && j != ii0)
-                    .filter(|&j| !matches!(&b[j], Stmt::Assign { dst: Expr::Var(x), src } if !src.has_call() && !mentioned_after(*x, b) && (first..k).all(|o| o == j || !crate::idioms::stmt_mentions(&b[o], *x))))
+                    .filter(|&j| !matches!(&b[j], Stmt::Assign { dst: Expr::Var(x), src } if !src.has_call() && !mentioned_after(*x, b) && (first..k).all(|o| o == j || !Stmt::uses_var(&b[o], *x))))
                     .map(|j| b[j].clone())
                     .collect();
                 // variables only the dropped main loop read (its pointer walks)
@@ -366,7 +359,7 @@ pub fn reroll_const(body: &mut Vec<Stmt>) {
                 b.splice(first..=last, repl);
                 k = first + nrepl;
                 for x in walked {
-                    let users: Vec<usize> = (0..b.len()).filter(|&j| crate::idioms::stmt_mentions(&b[j], x)).collect();
+                    let users: Vec<usize> = (0..b.len()).filter(|&j| Stmt::uses_var(&b[j], x)).collect();
                     if let [j] = users.as_slice() {
                         if matches!(&b[*j], Stmt::Assign { dst: Expr::Var(y), src } if *y == x && !src.has_call()) {
                             b.remove(*j);
@@ -391,7 +384,7 @@ pub fn reroll(body: &mut Vec<Stmt>) {
             if let Some((i, n, body1)) = shape_a(b, k) {
                 // `i = 0` right before becomes the init (its only role)
                 let mut init = vec![];
-                if let Some(j) = (0..k).rev().find(|&j| crate::idioms::stmt_mentions(&b[j], i)) {
+                if let Some(j) = (0..k).rev().find(|&j| Stmt::uses_var(&b[j], i)) {
                     if matches!(&b[j], Stmt::Assign { dst: Expr::Var(x), src } if *x == i && is_int(src, 0)) {
                         init.push(b.remove(j));
                         k -= 1;

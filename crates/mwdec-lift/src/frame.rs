@@ -17,7 +17,7 @@ pub struct Frame {
 }
 
 fn is_sym(i: &Insn, prefix: &str) -> bool {
-    i.reloc.as_ref().map_or(false, |r| r.target.starts_with(prefix))
+    i.reloc.as_ref().is_some_and(|r| r.target.starts_with(prefix))
 }
 
 pub fn analyze(insns: &[Insn], cfg: &Cfg) -> Frame {

@@ -755,7 +755,7 @@ pub fn fold_converting_return(ir: &mut IrFunction, db: Option<&mwdec_core::TypeD
         return;
     }
     // the returned class's constructor taking that class (or its template parameter)
-    let base = strip_template_args(&rcls);
+    let base = crate::sig::strip_tmpl(&rcls);
     let last = crate::sig::split_scope(&base).1.to_string();
     let key = format!("{base}::{last}");
     let takes = |d: &mwdec_core::DeclInfo| -> bool {
@@ -786,30 +786,15 @@ pub fn fold_converting_return(ir: &mut IrFunction, db: Option<&mwdec_core::TypeD
     ir.body.push(ret);
 }
 
-/// `rstl::optional_object<CAABox>` -> `rstl::optional_object` (decl keys carry no arguments).
-pub(crate) fn strip_template_args(s: &str) -> String {
-    let mut out = String::new();
-    let mut d = 0;
-    for c in s.chars() {
-        match c {
-            '<' => d += 1,
-            '>' => d -= 1,
-            _ if d == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Can an object of class `t` be copied where the draft writes `T(x)` or passes it by value: no
 /// copy constructor declared non-public (an implicit one is public).
 pub fn copyable(db: &mwdec_core::TypeDb, t: &Type) -> bool {
     let Some(cls) = named(strip_cv(t)) else { return false };
-    let base = strip_template_args(cls);
+    let base = crate::sig::strip_tmpl(cls);
     let last = crate::sig::split_scope(&base).1.to_string();
     let key = format!("{base}::{last}");
     let copy_ctor = |d: &&mwdec_core::DeclInfo| {
-        d.params.len() == 1 && matches!(strip_cv(&d.params[0].ty), Type::Ref(x) if named(strip_cv(x)).is_some_and(|n| strip_template_args(n) == base))
+        d.params.len() == 1 && matches!(strip_cv(&d.params[0].ty), Type::Ref(x) if named(strip_cv(x)).is_some_and(|n| crate::sig::strip_tmpl(n) == base))
     };
     !db.decls.get(&key).is_some_and(|ds| ds.iter().filter(copy_ctor).any(|d| d.access != mwdec_core::Access::Public))
 }
@@ -826,7 +811,7 @@ pub fn drop_default_construction_stores(ir: &mut IrFunction, db: Option<&mwdec_c
         }
         let Some(cls) = named(&var.ty).map(|s| s.to_string()) else { continue };
         let Some(c) = crate::sig::find_class(db, &cls) else { continue };
-        let base = strip_template_args(&cls);
+        let base = crate::sig::strip_tmpl(&cls);
         let last = crate::sig::split_scope(&base).1.to_string();
         let Some(init) = db.decls.get(&format!("{base}::{last}")).and_then(|ds| ds.iter().find(|d| d.params.is_empty() && d.is_inline_defined).and_then(|d| d.init_list.clone())) else { continue };
         // member offset -> constant literal
@@ -874,7 +859,7 @@ fn literal_value_is(lit: &str, e: &Expr) -> bool {
     let t: String = lit.split_whitespace().collect();
     match e {
         Expr::Int { value, .. } => t.parse::<i64>().ok() == Some(*value) || (t == "false" && *value == 0) || (t == "true" && *value == 1) || ((t == "nullptr" || t == "NULL") && *value == 0),
-        Expr::Float { bits, double } => t.trim_end_matches(|c| c == 'f' || c == 'F').parse::<f64>().ok().is_some_and(|x| if *double { x.to_bits() == *bits } else { (x as f32).to_bits() as u64 == *bits }),
+        Expr::Float { bits, double } => t.trim_end_matches(['f', 'F']).parse::<f64>().ok().is_some_and(|x| if *double { x.to_bits() == *bits } else { (x as f32).to_bits() as u64 == *bits }),
         _ => false,
     }
 }
@@ -889,7 +874,7 @@ pub fn fold_default_constructed_return(ir: &mut IrFunction, db: Option<&mwdec_co
     let resolved = crate::types::resolve(Some(db), &rt).into_owned();
     let Some(rcls) = named(strip_cv(&resolved)).map(|s| s.to_string()) else { return };
     let Some(c) = crate::sig::find_class(db, &rcls) else { return };
-    let base = strip_template_args(&rcls);
+    let base = crate::sig::strip_tmpl(&rcls);
     let last = crate::sig::split_scope(&base).1.to_string();
     let Some(decls) = db.decls.get(&format!("{base}::{last}")) else { return };
     // (member offset, constant) of the first argument-free inline constructor with constants
@@ -909,7 +894,7 @@ pub fn fold_default_constructed_return(ir: &mut IrFunction, db: Option<&mwdec_co
             }
             let Some(f) = c.fields.iter().find(|f| f.name == toks[0]) else { continue 'd };
             let inner = toks[2..toks.len() - 1].join(" ");
-            if names.iter().any(|n| *n == inner) {
+            if names.contains(&inner) {
                 // a parameter (its default) into an empty member: no store
                 if crate::types::size_of(Some(db), &f.ty).unwrap_or(0) > 1 || crate::types::is_aggregate(Some(db), &f.ty) && !c.fields.is_empty() && crate::types::size_of(Some(db), &f.ty) != Some(1) {
                     continue 'd;
@@ -1005,11 +990,11 @@ pub fn fold_default_constructed_return(ir: &mut IrFunction, db: Option<&mwdec_co
 /// The member a class's inline copy constructor increments through (`rc_ptr(const rc_ptr& o)
 /// : mPtr(o.mPtr), mRefCount(o.mRefCount) { ++*mRefCount; }`): its offset.
 fn copy_ctor_increment(db: &mwdec_core::TypeDb, cls: &str) -> Option<i32> {
-    let base = strip_template_args(cls);
+    let base = crate::sig::strip_tmpl(cls);
     let last = crate::sig::split_scope(&base).1.to_string();
     let ds = db.decls.get(&format!("{base}::{last}"))?;
     let d = ds.iter().find(|d| {
-        d.is_inline_defined && d.params.len() == 1 && matches!(strip_cv(&d.params[0].ty), Type::Ref(x) if named(strip_cv(x)).is_some_and(|n| strip_template_args(n) == base))
+        d.is_inline_defined && d.params.len() == 1 && matches!(strip_cv(&d.params[0].ty), Type::Ref(x) if named(strip_cv(x)).is_some_and(|n| crate::sig::strip_tmpl(n) == base))
     })?;
     let body = d.inline_body.as_deref()?.replace("( ( void ) 0 ) ;", "");
     let toks: Vec<&str> = body.split_whitespace().collect();
@@ -1083,13 +1068,6 @@ fn word_local(e: &Expr, vars: &[Var]) -> Option<VarId> {
         _ => return None,
     };
     matches!(vars[v].kind, VarKind::Stack { size: 4, .. }).then_some(v)
-}
-
-fn strip_casts(e: &Expr) -> &Expr {
-    match e {
-        Expr::Cast { e, .. } => strip_casts(e),
-        e => e,
-    }
 }
 
 /// Word slots of the frame filled one by one and copied out as words into consecutive members
@@ -1363,7 +1341,7 @@ pub fn derived_temporary_args(ir: &mut IrFunction, db: Option<&mwdec_core::TypeD
             };
             let known = crate::sig::find_class(db, &d).is_some_and(|c| !c.is_declaration);
             let uses = pre.len() + post.len() + 2;
-            if known || crate::sig::norm_name(&d) == crate::sig::norm_name(&base) || total.get(&v) != Some(&uses) || crate::sig::find_class(db, &base).map_or(true, |c| c.vtable.is_empty()) {
+            if known || crate::sig::norm_name(&d) == crate::sig::norm_name(&base) || total.get(&v) != Some(&uses) || crate::sig::find_class(db, &base).is_none_or(|c| c.vtable.is_empty()) {
                 j += 1;
                 continue;
             }

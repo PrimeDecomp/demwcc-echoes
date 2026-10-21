@@ -278,6 +278,34 @@ pub(crate) fn stmts_of(cst: &Cst, block: usize) -> Vec<usize> {
     cst.named(block).into_iter().filter(|&c| is_stmt(cst.kind(c))).collect()
 }
 
+/// Statements of a `case` (its value excluded).
+pub(crate) fn case_stmts(c: &Cst, case: usize) -> Vec<usize> {
+    let v = c.child(case, "value");
+    c.named(case).into_iter().filter(|&s| Some(s) != v && is_stmt(c.kind(s))).collect()
+}
+
+/// Does statement `s` end in a return, break, continue or goto (its last statement, for a block)?
+pub(crate) fn ends_in_jump(c: &Cst, s: usize) -> bool {
+    match c.kind(s) {
+        "return_statement" | "break_statement" | "continue_statement" | "goto_statement" => true,
+        "compound_statement" => stmts_of(c, s).last().is_some_and(|&l| ends_in_jump(c, l)),
+        _ => false,
+    }
+}
+
+/// The value of an if/while `condition_clause` (no declarations; unlike [`cond_expr`], not the
+/// parenthesized or bare conditions of other statements).
+pub(crate) fn cond_value(c: &Cst, stmt: usize) -> Option<usize> {
+    let cc = c.child(stmt, "condition")?;
+    match c.kind(cc) {
+        "condition_clause" => {
+            let v = c.child(cc, "value")?;
+            (c.kind(v) != "declaration").then_some(v)
+        }
+        _ => None,
+    }
+}
+
 /// The expression of an if/while condition clause (no declarations).
 pub(crate) fn cond_expr(cst: &Cst, stmt: usize) -> Option<usize> {
     let c = cst.child(stmt, "condition")?;
@@ -696,11 +724,10 @@ fn extraction_site(cst: &Cst, e: usize) -> Option<usize> {
                     return None;
                 }
             }
-            "while_statement" | "do_statement" => {
-                if cst.nodes[child].field == Some("condition") {
+            "while_statement" | "do_statement"
+                if cst.nodes[child].field == Some("condition") => {
                     return None;
                 }
-            }
             _ => {}
         }
         if is_stmt(k) && k != "compound_statement" {
@@ -732,8 +759,9 @@ fn in_lvalue_position(cst: &Cst, e: usize) -> bool {
                 return false;
             }
             "subscript_expression" if f == Some("argument") => {
-                // array lvalue: only a problem for arrays (not pointers); be conservative for locals.
-                return cst.kind(n) != "identifier" || true;
+                // array lvalue: only a problem for arrays (not pointers), which this does not tell
+                // apart; be conservative.
+                return true;
             }
             "parenthesized_expression" => n = p,
             _ => return false,
@@ -1170,7 +1198,7 @@ fn op_chain_assign(m: &mut M) -> Option<Vec<Edit>> {
             }
         }
     }
-    let (si, sj, l1, r1, l2, same_l) = cands.get(m.rng.below(cands.len().max(1)))?.clone();
+    let (si, sj, l1, r1, l2, same_l) = *cands.get(m.rng.below(cands.len().max(1)))?;
     let text = if same_l {
         format!("{} = {} = {};", c.text(l2), c.text(l1), c.text(r1))
     } else {
@@ -1329,7 +1357,7 @@ fn op_sign_cast(m: &mut M) -> Option<Vec<Edit>> {
             }
         }
     }
-    let (o, f) = cands.get(m.rng.below(cands.len().max(1)))?.clone();
+    let (o, f) = *cands.get(m.rng.below(cands.len().max(1)))?;
     Some(vec![Edit::replace(c, o, format!("({f}){}", ptext(c, o)))])
 }
 
@@ -1541,7 +1569,7 @@ fn op_shift_form(m: &mut M) -> Option<Vec<Edit>> {
     Some(vec![Edit::replace(c, n, t)])
 }
 
-fn strip_parens_node(c: &Cst, mut n: usize) -> usize {
+pub(crate) fn strip_parens_node(c: &Cst, mut n: usize) -> usize {
     while c.kind(n) == "parenthesized_expression" {
         match c.named(n).first() {
             Some(&x) => n = x,
@@ -1660,7 +1688,7 @@ fn op_early_return(m: &mut M) -> Option<Vec<Edit>> {
         let rest = if has_decl { c.text(body).to_string() } else { inner_block(c, body) };
         return Some(vec![Edit::replace(c, s, format!("{}\n{ind}{rest}", head.trim_end()))]);
     }
-    let (s, last) = back.get(m.rng.below(back.len().max(1)))?.clone();
+    let (s, last) = *back.get(m.rng.below(back.len().max(1)))?;
     let ind = indent_of(c, s);
     let next_start = c.src[c.nodes[s].end..].find(|ch: char| !ch.is_whitespace()).map(|k| c.nodes[s].end + k)?;
     let rest = &c.src[next_start..c.nodes[last].end];
@@ -1792,7 +1820,7 @@ fn op_do_to_while(m: &mut M) -> Option<Vec<Edit>> {
             cands.push((s, d, ce));
         }
     }
-    let (s, d, ce) = cands.get(m.rng.below(cands.len().max(1)))?.clone();
+    let (s, d, ce) = *cands.get(m.rng.below(cands.len().max(1)))?;
     let body = c.child(d, "body")?;
     Some(vec![Edit::replace(c, s, format!("while ({}) {}", c.text(ce), c.text(body)))])
 }
@@ -1945,7 +1973,7 @@ fn op_nested_if(m: &mut M) -> Option<Vec<Edit>> {
             format!("if ({}) {{\n{ind}    if ({}) {}\n{ind}}}", strip_parens(c.text(a)), strip_parens(c.text(b)), c.text(cons)),
         )]);
     }
-    let (s, ce, inner) = join.get(m.rng.below(join.len().max(1)))?.clone();
+    let (s, ce, inner) = *join.get(m.rng.below(join.len().max(1)))?;
     let ice = cond_expr(c, inner)?;
     let icons = c.child(inner, "consequence")?;
     Some(vec![Edit::replace(c, s, format!("if ({} && {}) {}", and_operand(c, ce), and_operand(c, ice), c.text(icons)))])
@@ -2621,7 +2649,7 @@ fn op_loop_break(m: &mut M) -> Option<Vec<Edit>> {
         };
         return Some(vec![Edit::replace(c, w, format!("{head} {{\n{ind}    if ({neg}) {{\n{ind}        break;\n{ind}    }}\n{ind}    {inner}\n{ind}}}"))]);
     }
-    let (w, x, body, first) = back.get(m.rng.below(back.len().max(1)))?.clone();
+    let (w, x, body, first) = *back.get(m.rng.below(back.len().max(1)))?;
     let ind = indent_of(c, w);
     let rest_start = c.src[c.nodes[first].end..].find(|ch: char| !ch.is_whitespace()).map(|k| c.nodes[first].end + k)?;
     let close = c.nodes[body].end - 1;
@@ -2663,17 +2691,6 @@ fn op_loop_cond_ne(m: &mut M) -> Option<Vec<Edit>> {
 pub struct Mutation {
     pub src: String,
     pub op: usize,
-}
-
-/// Parse `src`, locate the function for `symbol`, and apply operator `op` once.
-pub fn apply_op(src: &str, symbol: &str, op: usize, rng: &mut Rng) -> Option<String> {
-    apply_op_with(src, symbol, op, rng, None)
-}
-
-/// [`apply_op`] with target register hints.
-pub fn apply_op_with(src: &str, symbol: &str, op: usize, rng: &mut Rng, hints: Option<&RegHints>) -> Option<String> {
-    let p = Parsed::new(src, symbol)?;
-    p.apply(op, rng, hints)
 }
 
 /// Apply a variable-centric operator (inline_temp, inline_var_all) to local `focus` only.
@@ -2752,31 +2769,16 @@ pub fn mutate(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng) -> Option
 
 /// [`mutate`] with target register hints and context facts.
 pub fn mutate_with(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>, ctx: Option<&OpContext>) -> Option<Mutation> {
-    let total: f64 = weights.iter().sum();
-    if total <= 0.0 {
-        return None;
-    }
-    let p = Parsed::new(src, symbol)?.with_ctx(ctx);
-    for _ in 0..12 {
-        let mut x = rng.f64() * total;
-        let mut op = 0;
-        for (i, w) in weights.iter().enumerate() {
-            if x < *w {
-                op = i;
-                break;
-            }
-            x -= w;
-            op = i;
-        }
-        if let Some(s) = p.apply(op, rng, hints) {
-            return Some(Mutation { src: s, op });
-        }
-    }
-    None
+    mutate_ranges(src, symbol, weights, rng, hints, ctx, None)
 }
 
 /// [`mutate_with`] with sites restricted to byte `ranges` of `src` (see [`Parsed::apply_in`]).
 pub fn mutate_in(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>, ctx: Option<&OpContext>, ranges: &[(usize, usize)]) -> Option<Mutation> {
+    mutate_ranges(src, symbol, weights, rng, hints, ctx, Some(ranges))
+}
+
+/// Up to 12 tries of an operator drawn by `weights`, its sites within `ranges` when given.
+fn mutate_ranges(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints: Option<&RegHints>, ctx: Option<&OpContext>, ranges: Option<&[(usize, usize)]>) -> Option<Mutation> {
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
         return None;
@@ -2793,7 +2795,7 @@ pub fn mutate_in(src: &str, symbol: &str, weights: &[f64], rng: &mut Rng, hints:
             x -= w;
             op = i;
         }
-        if let Some(s) = p.apply_in(op, rng, hints, None, Some(ranges)) {
+        if let Some(s) = p.apply_in(op, rng, hints, None, ranges) {
             return Some(Mutation { src: s, op });
         }
     }

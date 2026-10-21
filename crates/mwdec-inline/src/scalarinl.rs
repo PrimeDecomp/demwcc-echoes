@@ -152,10 +152,10 @@ fn typed_args(e: &mut Expr, env: &Env) {
     }
     let Expr::Call { callee: Callee::Direct { sig, .. } | Callee::Method { sig, .. }, args, .. } = x else { return };
     for (a, p) in args.iter_mut().zip(&sig.params) {
-        let pt = crate::util::strip(&p.ty).clone();
+        let pt = mwdec_lift::strip_cv(&p.ty).clone();
         let at = mwdec_lift::types::ty_of(a, env.vars);
         let rp = mwdec_lift::types::resolve(Some(env.db), &pt).into_owned();
-        let differs = match (crate::util::strip(&rp).int_info(), crate::util::strip(&at).int_info()) {
+        let differs = match (mwdec_lift::strip_cv(&rp).int_info(), mwdec_lift::strip_cv(&at).int_info()) {
             (Some(x), Some(y)) => x != y,
             (Some(_), None) => matches!(at, Type::Float { .. }),
             (None, Some(_)) => matches!(rp, Type::Float { .. }),
@@ -187,8 +187,8 @@ fn compare_kind(e: &Expr, env: &Env) -> Option<Type> {
             return;
         }
         for o in [l, r] {
-            let t = mwdec_lift::types::resolve(Some(env.db), crate::util::strip(&mwdec_lift::types::ty_of(o, env.vars))).into_owned();
-            match crate::util::strip(&t) {
+            let t = mwdec_lift::types::resolve(Some(env.db), mwdec_lift::strip_cv(&mwdec_lift::types::ty_of(o, env.vars))).into_owned();
+            match mwdec_lift::strip_cv(&t) {
                 Type::Float { size } => kind = Some(Type::Float { size: *size }),
                 t => {
                     if let Some((4, false)) = t.int_info() {
@@ -212,14 +212,14 @@ fn instance_for(call: Expr, want: &Option<Type>, env: &Env) -> Expr {
     let Some(want) = want else { return call };
     let Expr::Call { callee: Callee::Direct { sig, .. } | Callee::Method { sig, .. }, args, .. } = &call else { return call };
     let hole_ty = |t: &crate::template::Template| match t.holes.first() {
-        Some(HoleKind::Scalar(h)) => Some(mwdec_lift::types::resolve(Some(env.db), crate::util::strip(h)).into_owned()),
+        Some(HoleKind::Scalar(h)) => Some(mwdec_lift::types::resolve(Some(env.db), mwdec_lift::strip_cv(h)).into_owned()),
         _ => None,
     };
-    let same = |a: &Type, b: &Type| match (crate::util::strip(a), crate::util::strip(b)) {
+    let same = |a: &Type, b: &Type| match (mwdec_lift::strip_cv(a), mwdec_lift::strip_cv(b)) {
         (Type::Float { size: x }, Type::Float { size: y }) => x == y,
         (x, y) => x.int_info().is_some() && x.int_info() == y.int_info(),
     };
-    if sig.params.first().is_some_and(|p| same(&mwdec_lift::types::resolve(Some(env.db), crate::util::strip(&p.ty)), want)) {
+    if sig.params.first().is_some_and(|p| same(&mwdec_lift::types::resolve(Some(env.db), mwdec_lift::strip_cv(&p.ty)), want)) {
         return call;
     }
     let shape = env.lib.templates.iter().find(|t| t.name == sig.qualified_name && t.sig.params.len() == sig.params.len()).map(|t| format!("{:?}", t.shape));
@@ -244,7 +244,7 @@ fn match_ternary(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
         }
         if let Expr::Cast { ty, e: inner } = x {
             let it = mwdec_lift::types::ty_of(inner, env.vars);
-            if let (Some((a, _)), Some((b, _))) = (crate::util::strip(ty).int_info(), crate::util::strip(&it).int_info()) {
+            if let (Some((a, _)), Some((b, _))) = (mwdec_lift::strip_cv(ty).int_info(), mwdec_lift::strip_cv(&it).int_info()) {
                 if a == b && a == 4 {
                     *x = (**inner).clone();
                 }
@@ -261,12 +261,12 @@ fn match_ternary(e: &Expr, env: &Env, idx: &Index) -> Option<Expr> {
                 flip_at(&mut cand, p);
             }
         }
-        if std::env::var_os("MWDI_TRACE_SCALARINL").is_some() {
+        if env_flag!("MWDI_TRACE_SCALARINL") {
             eprintln!("scalarinl: try {cand:?}");
         }
         let mut s = Stmt::Expr(cand);
         if scalar_shallow(&mut s, env, idx) > 0 {
-            if let Stmt::Expr(mut x) = s {
+            if let Stmt::Expr(x) = s {
                 if is_helper_call(&x) {
                     let mut x = instance_for(x, &want, env);
                     typed_args(&mut x, env);
@@ -340,10 +340,10 @@ fn quantized_casts(e: &mut Expr, lib: &InlineLib, env: &Env) -> usize {
     let mut by_type: Vec<((u8, bool), usize)> = vec![];
     for (i, t) in lib.templates.iter().enumerate() {
         let ([HoleKind::Scalar(h)], Shape::Scalar(Expr::Cast { ty, e: x })) = (t.holes.as_slice(), &t.shape) else { continue };
-        if !matches!(crate::util::strip(h), Type::Float { size: 4 }) || !matches!(**x, Expr::Var(0)) {
+        if !matches!(mwdec_lift::strip_cv(h), Type::Float { size: 4 }) || !matches!(**x, Expr::Var(0)) {
             continue;
         }
-        let (Some(ci), Some(ri)) = (crate::util::strip(ty).int_info(), mwdec_lift::types::resolve(Some(env.db), crate::util::strip(&t.sig.ret)).int_info()) else { continue };
+        let (Some(ci), Some(ri)) = (mwdec_lift::strip_cv(ty).int_info(), mwdec_lift::types::resolve(Some(env.db), mwdec_lift::strip_cv(&t.sig.ret)).int_info()) else { continue };
         if ci == ri && ci.0 < 4 && !by_type.iter().any(|(k, _)| *k == ci) {
             by_type.push((ci, i));
         }
@@ -354,7 +354,7 @@ fn quantized_casts(e: &mut Expr, lib: &InlineLib, env: &Env) -> usize {
     let mut n = 0;
     e.rewrite(&mut |x| {
         let Expr::Cast { ty, e: inner } = &*x else { return };
-        let Some(ci) = crate::util::strip(ty).int_info() else { return };
+        let Some(ci) = mwdec_lift::strip_cv(ty).int_info() else { return };
         if !matches!(mwdec_lift::types::ty_of(inner, env.vars), Type::Float { .. }) {
             return;
         }

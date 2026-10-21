@@ -97,12 +97,7 @@ const SAMPLES: [u32; 16] = [0, 1, 7, 99, 100, 1000, 4095, 65535, 65536, 999_999,
 
 fn find_divisor(est: f64, check: &dyn Fn(u32) -> bool) -> Option<i64> {
     let base = est.round() as i64;
-    for d in [base, base - 1, base + 1] {
-        if d >= 2 && check(d as u32) {
-            return Some(d);
-        }
-    }
-    None
+    [base, base - 1, base + 1].into_iter().find(|&d| d >= 2 && check(d as u32))
 }
 
 /// Unsigned `mulhwu(x, M) >> s` -> d
@@ -180,12 +175,11 @@ fn try_fold(e: &Expr, c: &Ctx, vars: &[Var]) -> Option<Expr> {
         }
         Expr::Binary { op: BinOp::Add, l, r, .. } => {
             // t + ((u32)t >> 31) with t = mulhw(M, x) [+ x] >> s (arithmetic)
-            let (t, sign) = match (c.res(l), c.res(r)) {
-                (_, Expr::Binary { op: BinOp::Shr, l: tt, r: k, .. }) if k.as_int() == Some(31) && same(c, tt, l) => (l, ()),
-                (Expr::Binary { op: BinOp::Shr, l: tt, r: k, .. }, _) if k.as_int() == Some(31) && same(c, tt, r) => (r, ()),
+            let t = match (c.res(l), c.res(r)) {
+                (_, Expr::Binary { op: BinOp::Shr, l: tt, r: k, .. }) if k.as_int() == Some(31) && same(c, tt, l) => l,
+                (Expr::Binary { op: BinOp::Shr, l: tt, r: k, .. }, _) if k.as_int() == Some(31) && same(c, tt, r) => r,
                 _ => return None,
             };
-            let _ = sign;
             let Expr::Binary { op: BinOp::Shr, l: inner, r: s, .. } = c.res(t) else { return None };
             let s = s.as_int()? as u32;
             if let Some((x, m, true)) = c.mulh_of(inner) {

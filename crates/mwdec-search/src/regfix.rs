@@ -106,168 +106,73 @@ pub fn register_only(f: &Fitness) -> bool {
 pub fn neighbours(src: &str, symbol: &str, hints: Option<&RegHints>, seeds: u64, seen: &mut HashSet<String>) -> Vec<(String, &'static str)> {
     let Some(p) = Parsed::new(src, symbol) else { return vec![] };
     let mut out = vec![];
-    for c in const_param_variants(src, symbol) {
+    fn add(out: &mut Vec<(String, &'static str)>, seen: &mut HashSet<String>, c: String, name: &'static str) {
         if seen.insert(normalize(&c)) {
-            out.push((c, "const_param"));
+            out.push((c, name));
         }
     }
-    for c in cond_local_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "cond_local"));
-        }
-    }
-    for c in param_copy_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "param_copy"));
-        }
-    }
-    for c in hoist_loads_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "hoist_loads"));
-        }
-    }
-    for c in loop_bound_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "loop_bound"));
+    type Variants = fn(&str, &str) -> Vec<String>;
+    let first: [(Variants, &'static str); 5] = [
+        (const_param_variants, "const_param"),
+        (cond_local_variants, "cond_local"),
+        (param_copy_variants, "param_copy"),
+        (hoist_loads_variants, "hoist_loads"),
+        (loop_bound_variants, "loop_bound"),
+    ];
+    for (f, name) in first {
+        for c in f(src, symbol) {
+            add(&mut out, seen, c, name);
         }
     }
     // every such value read in the loop at once
-    let mut cur = src.to_string();
-    for _ in 0..8 {
-        match loop_bound_variants(&cur, symbol).into_iter().next() {
-            Some(n) => cur = n,
-            None => break,
-        }
+    let cur = first_variant_fixpoint(src, symbol, loop_bound_variants);
+    if cur != src {
+        add(&mut out, seen, cur, "loop_bound");
     }
-    if cur != src && seen.insert(normalize(&cur)) {
-        out.push((cur, "loop_bound"));
-    }
-    for c in store_reuse_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "store_reuse"));
-        }
-    }
-    for c in volatile_poll_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "volatile_poll"));
-        }
-    }
-    for c in hoist_common_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "hoist_common"));
-        }
-    }
-    for c in accumulate_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "accumulate"));
-        }
-    }
-    for c in member_ref_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "member_ref"));
-        }
-    }
-    for c in mask_type_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "mask_type"));
-        }
-    }
-    for c in fold_call_up_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "fold_call_up"));
-        }
-    }
-    for c in narrow_ret_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "narrow_ret"));
-        }
-    }
-    for c in ret_flag_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "ret_flag"));
-        }
-    }
-    for c in widen_local_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "widen_local"));
-        }
-    }
-    for c in select_else_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "select_else"));
-        }
-    }
-    for c in sink_load_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "sink_load"));
+    let middle: [(Variants, &'static str); 12] = [
+        (store_reuse_variants, "store_reuse"),
+        (volatile_poll_variants, "volatile_poll"),
+        (hoist_common_variants, "hoist_common"),
+        (accumulate_variants, "accumulate"),
+        (member_ref_variants, "member_ref"),
+        (mask_type_variants, "mask_type"),
+        (fold_call_up_variants, "fold_call_up"),
+        (narrow_ret_variants, "narrow_ret"),
+        (ret_flag_variants, "ret_flag"),
+        (widen_local_variants, "widen_local"),
+        (select_else_variants, "select_else"),
+        (sink_load_variants, "sink_load"),
+    ];
+    for (f, name) in middle {
+        for c in f(src, symbol) {
+            add(&mut out, seen, c, name);
         }
     }
     // every such load sunk at once (one step each would need as many levels)
-    let mut cur = src.to_string();
-    for _ in 0..8 {
-        match sink_load_variants(&cur, symbol).into_iter().next() {
-            Some(n) => cur = n,
-            None => break,
-        }
-    }
+    let cur = first_variant_fixpoint(src, symbol, sink_load_variants);
     if cur != src {
         if let Some(cc) = compound_all(&cur, symbol) {
-            if seen.insert(normalize(&cc)) {
-                out.push((cc, "sink_load"));
-            }
+            add(&mut out, seen, cc, "sink_load");
         }
-        if seen.insert(normalize(&cur)) {
-            out.push((cur, "sink_load"));
-        }
+        add(&mut out, seen, cur, "sink_load");
     }
     if let Some(cc) = compound_all(src, symbol) {
-        if seen.insert(normalize(&cc)) {
-            out.push((cc, "compound_assign"));
-        }
+        add(&mut out, seen, cc, "compound_assign");
     }
-    for c in return_construct_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "return_construct"));
-        }
-    }
-    for c in construct_copy_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "construct_copy"));
-        }
-    }
-    for c in lvalue_ref_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "lvalue_ref"));
-        }
-    }
-    for c in vec_compound_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "vec_compound"));
-        }
-    }
-    for c in swap_defs_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "swap_defs"));
-        }
-    }
-    for c in inline_getter_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "inline_getter"));
-        }
-    }
-    for c in obj_copy_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "obj_copy"));
-        }
-    }
-    for c in vec_local_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "vec_local"));
-        }
-    }
-    for c in arg_order_variants(src, symbol) {
-        if seen.insert(normalize(&c)) {
-            out.push((c, "arg_order"));
+    let last: [(Variants, &'static str); 9] = [
+        (return_construct_variants, "return_construct"),
+        (construct_copy_variants, "construct_copy"),
+        (lvalue_ref_variants, "lvalue_ref"),
+        (vec_compound_variants, "vec_compound"),
+        (swap_defs_variants, "swap_defs"),
+        (inline_getter_variants, "inline_getter"),
+        (obj_copy_variants, "obj_copy"),
+        (vec_local_variants, "vec_local"),
+        (arg_order_variants, "arg_order"),
+    ];
+    for (f, name) in last {
+        for c in f(src, symbol) {
+            add(&mut out, seen, c, name);
         }
     }
     for name in REG_OPS {
@@ -302,6 +207,18 @@ pub fn neighbours(src: &str, symbol: &str, hints: Option<&RegHints>, seeds: u64,
     out
 }
 
+/// `src` after up to 8 steps of `f`'s first variant each.
+fn first_variant_fixpoint(src: &str, symbol: &str, f: fn(&str, &str) -> Vec<String>) -> String {
+    let mut cur = src.to_string();
+    for _ in 0..8 {
+        match f(&cur, symbol).into_iter().next() {
+            Some(n) => cur = n,
+            None => break,
+        }
+    }
+    cur
+}
+
 /// `src` with every split declaration (`T x; ... x = v;`) merged into its first assignment
 /// (`T x = v;`): the drafts' style, which keeps the temp-inlining operators from applying.
 pub fn merge_all_decls(src: &str, symbol: &str) -> Option<String> {
@@ -324,7 +241,7 @@ pub fn merge_all_decls(src: &str, symbol: &str) -> Option<String> {
 /// codegen temporaries, so this changes which values are coloured first (e.g. three FIFO writes
 /// `GXPosition3f32(v.x, v.y, v.z)` expanded by the compiler).
 pub fn arg_order_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -381,11 +298,7 @@ pub fn arg_order_variants(src: &str, symbol: &str) -> Vec<String> {
                     edits.push(Edit::replace(&c, rs[j], name));
                 }
                 edits.push(Edit::insert(at, decls));
-                if let Some(s) = apply(src, &edits) {
-                    if Cst::parse(&s).errors <= c.errors {
-                        out.push(s);
-                    }
-                }
+                out.extend(crate::cst::apply_checked(src, &c, &edits));
             }
         }
     }
@@ -416,7 +329,7 @@ fn component(c: &crate::cst::Cst, n: usize) -> Option<(String, usize)> {
 /// ...`): the expanded vector operator creates the components in its own order (front-end
 /// temporaries), which decides their registers.
 pub fn vec_local_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -473,11 +386,7 @@ pub fn vec_local_variants(src: &str, symbol: &str) -> Vec<String> {
             for x in &group {
                 edits.push(Edit::replace(&c, x.1, format!("{name}.{}()", ["GetX", "GetY", "GetZ"][x.5])));
             }
-            if let Some(s) = apply(src, &edits) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &edits));
         }
     }
     out
@@ -489,7 +398,7 @@ pub fn vec_local_variants(src: &str, symbol: &str) -> Vec<String> {
 /// before the first component read in the block of the rebuild (and, as a second candidate,
 /// before the first component read at all).
 pub fn obj_copy_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -575,11 +484,7 @@ pub fn obj_copy_variants(src: &str, symbol: &str) -> Vec<String> {
             for d in ds.iter().filter(|d| sp.contains(&d.0)) {
                 edits.push(Edit::replace(&c, d.1, format!("{name}.{}()", ["GetX", "GetY", "GetZ"][d.3])));
             }
-            if let Some(s) = apply(src, &edits) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &edits));
         }
     }
     out
@@ -590,7 +495,7 @@ pub fn obj_copy_variants(src: &str, symbol: &str) -> Vec<String> {
 /// register follows from where it is created. Only while `obj` is not written before the last
 /// use's own statement (a `Set*` / assignment there happens after its operands are read).
 pub fn inline_getter_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -654,11 +559,7 @@ pub fn inline_getter_variants(src: &str, symbol: &str) -> Vec<String> {
             }
             let mut edits: Vec<Edit> = uses.iter().map(|&(_, d)| Edit::replace(&c, d, c.text(v).to_string())).collect();
             edits.push(Edit::replace(&c, t, String::new()));
-            if let Some(s) = apply(src, &edits) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &edits));
         }
     }
     out
@@ -668,7 +569,7 @@ pub fn inline_getter_variants(src: &str, symbol: &str) -> Vec<String> {
 /// where the values only read memory, possibly through `Get*` accessors (which the general
 /// statement swap treats as calls with side effects): their creation order decides registers.
 pub fn swap_defs_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -715,11 +616,7 @@ pub fn swap_defs_variants(src: &str, symbol: &str) -> Vec<String> {
                 continue;
             }
             let e = vec![Edit::replace(&c, w[0], c.text(w[1]).to_string()), Edit::replace(&c, w[1], c.text(w[0]).to_string())];
-            if let Some(s) = apply(src, &e) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &e));
         }
     }
     out
@@ -729,7 +626,7 @@ pub fn swap_defs_variants(src: &str, symbol: &str) -> Vec<String> {
 /// Z, in order) as the compound vector operator (`D *= s;`), whose expansion evaluates the
 /// operands in its own order.
 pub fn vec_compound_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -792,11 +689,7 @@ pub fn vec_compound_variants(src: &str, symbol: &str) -> Vec<String> {
                 }
             }
             for e in variants {
-                if let Some(s) = apply(src, &e) {
-                    if Cst::parse(&s).errors <= c.errors {
-                        out.push(s);
-                    }
-                }
+                out.extend(crate::cst::apply_checked(src, &c, &e));
             }
         }
     }
@@ -807,13 +700,13 @@ pub fn vec_compound_variants(src: &str, symbol: &str) -> Vec<String> {
 /// first (`__typeof__(a[i])& ref = a[i]; ref = v;`): the address is then computed before the
 /// stored value, which changes their creation order and so their registers.
 pub fn lvalue_ref_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
     let mut out = vec![];
     for t in c.descendants(info.body) {
-        if c.kind(t) != "expression_statement" || !c.parent(t).is_some_and(|p| c.kind(p) == "compound_statement") {
+        if c.kind(t) != "expression_statement" || c.parent(t).is_none_or(|p| c.kind(p) != "compound_statement") {
             continue;
         }
         let Some(a) = c.named(t).first().copied().filter(|&a| c.kind(a) == "assignment_expression") else { continue };
@@ -828,11 +721,7 @@ pub fn lvalue_ref_variants(src: &str, symbol: &str) -> Vec<String> {
         let line_start = src[..at].rfind('\n').map(|x| x + 1).unwrap_or(0);
         let ind = &src[line_start..at];
         let text = format!("__typeof__({lt})& {name} = {lt};\n{ind}{name} {op} {};", c.text(r));
-        if let Some(s) = apply(src, &[Edit::replace(&c, t, text)]) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &[Edit::replace(&c, t, text)]));
     }
     out
 }
@@ -880,7 +769,7 @@ fn parse_int(t: &str) -> Option<i64> {
 /// *(float*)(B + 0x1c), ...)`) as a copy of the object there (`*(T*)((char*)B + 0x18)`): a
 /// struct copy moves member by member (load/store pairs) instead of loading every member first.
 pub fn construct_copy_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -904,11 +793,7 @@ pub fn construct_copy_variants(src: &str, symbol: &str) -> Vec<String> {
         }
         let t = c.text(f);
         let text = format!("*({t}*)((char*){} + 0x{:x})", loads[0].0, loads[0].1);
-        if let Some(s) = apply(src, &[Edit::replace(&c, n, text)]) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &[Edit::replace(&c, n, text)]));
     }
     out
 }
@@ -917,7 +802,7 @@ pub fn construct_copy_variants(src: &str, symbol: &str) -> Vec<String> {
 /// return r;`) returned as a constructor call instead (`return T(x, y);`): the temporary is
 /// built in place with the constructor's evaluation order.
 pub fn return_construct_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -967,11 +852,7 @@ pub fn return_construct_variants(src: &str, symbol: &str) -> Vec<String> {
             let args: Vec<&str> = vals.iter().map(|&v| c.text(v)).collect();
             let text = format!("return {ty}({});", args.join(", "));
             let e = vec![Edit { start: c.nodes[sibs[k]].start, end: c.nodes[r].end, text }];
-            if let Some(s) = apply(src, &e) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &e));
         }
     }
     out
@@ -982,7 +863,7 @@ pub fn return_construct_variants(src: &str, symbol: &str) -> Vec<String> {
 /// (conservatively assuming the stores may alias), but the compiler's alias analysis may hoist
 /// the load itself, and where the value is created decides its register.
 pub fn sink_load_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1018,7 +899,7 @@ pub fn sink_load_variants(src: &str, symbol: &str) -> Vec<String> {
                 }
                 _ => continue,
             };
-            if !info.vars.get(&name).is_some_and(|v| !v.is_param) || info.aliased.contains(&name) || has_call(val) {
+            if info.vars.get(&name).is_none_or(|v| v.is_param) || info.aliased.contains(&name) || has_call(val) {
                 continue;
             }
             let reads = idents(val);
@@ -1055,11 +936,7 @@ pub fn sink_load_variants(src: &str, symbol: &str) -> Vec<String> {
             }
             let mut e: Vec<Edit> = later.iter().map(|&(_, u)| Edit::replace(&c, u, format!("({})", c.text(val)))).collect();
             e.push(Edit::replace(&c, t, String::new()));
-            if let Some(s) = apply(src, &e) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &e));
         }
     }
     out
@@ -1068,7 +945,7 @@ pub fn sink_load_variants(src: &str, symbol: &str) -> Vec<String> {
 /// `T x = a; if (c) { x = b; }` (or `x = a; ...`) as `T x; if (c) { x = b; } else { x = a; }`:
 /// the default value computed only on its own path.
 pub fn select_else_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1124,11 +1001,7 @@ pub fn select_else_variants(src: &str, symbol: &str) -> Vec<String> {
                 None => String::new(),
             };
             let text = format!("{head}if {} {{\n{ind}    {}\n{ind}}} else {{\n{ind}    {x} = {};\n{ind}}}", c.text(cond), c.text(*only), c.text(a));
-            if let Some(s) = apply(src, &[Edit { start: at, end: c.nodes[s2].end, text }]) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &[Edit { start: at, end: c.nodes[s2].end, text }]));
         }
     }
     out
@@ -1138,7 +1011,7 @@ pub fn select_else_variants(src: &str, symbol: &str) -> Vec<String> {
 /// the compiler knows is already extended (loaded with `lhz`, a constant) is not narrowed again
 /// at each use, which changes both instructions and registers.
 pub fn widen_local_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     const NARROW: &[&str] = &["unsigned short", "short", "unsigned char", "signed char", "char", "u8", "u16", "s8", "s16", "uchar", "ushort"];
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
@@ -1159,11 +1032,7 @@ pub fn widen_local_variants(src: &str, symbol: &str) -> Vec<String> {
         }
         let signed = !(tt.starts_with("unsigned") || tt.starts_with('u'));
         for w in if signed { ["int", "unsigned int"] } else { ["unsigned int", "int"] } {
-            if let Some(s) = apply(src, &[Edit::replace(&c, ty, w.to_string())]) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &[Edit::replace(&c, ty, w.to_string())]));
         }
     }
     out
@@ -1172,7 +1041,7 @@ pub fn widen_local_variants(src: &str, symbol: &str) -> Vec<String> {
 /// Every `L = L op e;` written `L op= e;` (one candidate): MWCC evaluates the compound form's
 /// operands in another order, which matters for read-modify-writes of memory.
 pub fn compound_all(src: &str, symbol: &str) -> Option<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let def = crate::func::find_target(&c, symbol)?;
     let body = c.child(def, "body")?;
@@ -1198,8 +1067,7 @@ pub fn compound_all(src: &str, symbol: &str) -> Option<String> {
     if edits.is_empty() {
         return None;
     }
-    let s = apply(src, &edits)?;
-    (Cst::parse(&s).errors <= c.errors).then_some(s)
+    crate::cst::apply_checked(src, &c, &edits)
 }
 
 /// A boolean result kept in a local flag set before everything else (`bool r = K; ...; return r;`):
@@ -1207,7 +1075,7 @@ pub fn compound_all(src: &str, symbol: &str) -> Option<String> {
 /// `if (c) { ...; return e; } return K;` -> `bool r = K; ... if (c) { ...; r = e; } return r;`.
 /// The flag's constant is materialized up front (often in a callee-saved register).
 pub fn ret_flag_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1228,11 +1096,7 @@ pub fn ret_flag_variants(src: &str, symbol: &str) -> Vec<String> {
     let lit = |n: usize| matches!(c.text(n).trim(), "true" | "false" | "0" | "1");
     let mut out = vec![];
     let mut push = |edits: Vec<Edit>| {
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     };
     if !lit(e) {
         push(vec![
@@ -1265,7 +1129,7 @@ pub fn ret_flag_variants(src: &str, symbol: &str) -> Vec<String> {
 /// A returned comparison narrowed explicitly (`return (unsigned char)(a == b);`): the 0/1 is
 /// then truncated to a byte (`extrwi`), as when the source returned it through a byte-sized type.
 pub fn narrow_ret_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(body) = c.child(def, "body") else { return vec![] };
@@ -1284,17 +1148,14 @@ pub fn narrow_ret_variants(src: &str, symbol: &str) -> Vec<String> {
     if edits.is_empty() {
         return vec![];
     }
-    match apply(src, &edits) {
-        Some(s) if Cst::parse(&s).errors <= c.errors => vec![s],
-        _ => vec![],
-    }
+    crate::cst::apply_checked(src, &c, &edits).into_iter().collect()
 }
 
 /// A call result kept in a local and used once inside arithmetic later (`t = f(); ...; *p = a *
 /// t;`) computed at the call instead (`z = a * f(); ...; *p = z;`): the product is then created
 /// right after the call, before whatever the statements in between create.
 pub fn fold_call_up_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1326,7 +1187,7 @@ pub fn fold_call_up_variants(src: &str, symbol: &str) -> Vec<String> {
                 }
                 _ => continue,
             };
-            if c.kind(val) != "call_expression" || !info.vars.get(&name).is_some_and(|v| !v.is_param) {
+            if c.kind(val) != "call_expression" || info.vars.get(&name).is_none_or(|v| v.is_param) {
                 continue;
             }
             let uses: Vec<usize> = c.descendants(info.body).into_iter().filter(|&d| c.kind(d) == "identifier" && c.text(d) == name && c.nodes[d].start > c.nodes[val].end).collect();
@@ -1374,11 +1235,7 @@ pub fn fold_call_up_variants(src: &str, symbol: &str) -> Vec<String> {
             let line_start = src[..at].rfind('\n').map(|q| q + 1).unwrap_or(0);
             let _ = line_start;
             let edits = vec![Edit::replace(&c, t, format!("__typeof__({etext}) {z} = {etext};")), Edit::replace(&c, e, z)];
-            if let Some(s) = apply(src, &edits) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &edits));
         }
     }
     out
@@ -1389,7 +1246,7 @@ pub fn fold_call_up_variants(src: &str, symbol: &str) -> Vec<String> {
 /// (`(unsigned int)x >> 8 & 255` -> `x >> 8 & 255`, the mask clears the sign bits anyway): the
 /// drafts spell out extensions the source left to the types (one candidate each).
 pub fn mask_type_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1447,11 +1304,7 @@ pub fn mask_type_variants(src: &str, symbol: &str) -> Vec<String> {
         }
     }
     if !edits.is_empty() {
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     }
     // unsigned casts before masked shifts
     let mut edits = vec![];
@@ -1476,11 +1329,7 @@ pub fn mask_type_variants(src: &str, symbol: &str) -> Vec<String> {
         edits.push(Edit::replace(&c, x, c.text(v).to_string()));
     }
     if !edits.is_empty() {
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     }
     out
 }
@@ -1489,7 +1338,7 @@ pub fn mask_type_variants(src: &str, symbol: &str) -> Vec<String> {
 /// through a reference bound at the top (`__typeof__(this->mBounds)& ref = this->mBounds;`): its
 /// address is then computed once, into a register of its own.
 pub fn member_ref_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1501,7 +1350,7 @@ pub fn member_ref_variants(src: &str, symbol: &str) -> Vec<String> {
         if c.kind(n) != "field_expression" || c.op(n) != Some("->") {
             continue;
         }
-        if !c.child(n, "argument").is_some_and(|a| c.kind(a) == "this") {
+        if c.child(n, "argument").is_none_or(|a| c.kind(a) != "this") {
             continue;
         }
         if c.parent(n).is_some_and(|p| c.kind(p) == "field_expression" && c.op(p) == Some(".") && c.child(p, "argument") == Some(n)) {
@@ -1521,11 +1370,7 @@ pub fn member_ref_variants(src: &str, symbol: &str) -> Vec<String> {
         for &n in ns {
             edits.push(Edit::replace(&c, n, name.clone()));
         }
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     }
     out
 }
@@ -1534,7 +1379,7 @@ pub fn member_ref_variants(src: &str, symbol: &str) -> Vec<String> {
 /// `GetX/Y/Z` accessors) accumulated in a local before the statement (`T s = a; s += b; s += c;`):
 /// the front end keeps the accumulation order instead of reassociating the sum.
 pub fn accumulate_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1562,7 +1407,7 @@ pub fn accumulate_variants(src: &str, symbol: &str) -> Vec<String> {
             t.iter().map(|&x| c.text(x).to_string()).collect()
         } else if c.kind(n) == "call_expression" && c.child(n, "arguments").is_some_and(|a| c.named(a).is_empty()) {
             let Some(f) = c.child(n, "function").filter(|&f| c.kind(f) == "field_expression") else { continue };
-            if !c.child(f, "field").is_some_and(|x| c.text(x) == "MagSquared") {
+            if c.child(f, "field").is_none_or(|x| c.text(x) != "MagSquared") {
                 continue;
             }
             let Some(o) = c.child(f, "argument") else { continue };
@@ -1588,11 +1433,7 @@ pub fn accumulate_variants(src: &str, symbol: &str) -> Vec<String> {
             decl.push_str(&format!("{name} += {t};\n{ind}"));
         }
         let edits = vec![Edit::insert(at, decl), Edit::replace(&c, n, name)];
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     }
     out
 }
@@ -1601,7 +1442,7 @@ pub fn accumulate_variants(src: &str, symbol: &str) -> Vec<String> {
 /// named once before the `if` (`__typeof__((u8)x) t = (u8)x;`): the value is then created ahead
 /// of the branch, as when the source kept it in a local.
 pub fn hoist_common_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1613,7 +1454,7 @@ pub fn hoist_common_variants(src: &str, symbol: &str) -> Vec<String> {
             && !c.parent(n).is_some_and(|p| c.kind(p) == "assignment_expression" && c.child(p, "left") == Some(n))
     };
     for st in c.descendants(info.body) {
-        if c.kind(st) != "if_statement" || !c.parent(st).is_some_and(|p| c.kind(p) == "compound_statement") {
+        if c.kind(st) != "if_statement" || c.parent(st).is_none_or(|p| c.kind(p) != "compound_statement") {
             continue;
         }
         let (Some(cons), Some(alt)) = (c.child(st, "consequence"), c.child(st, "alternative")) else { continue };
@@ -1645,11 +1486,7 @@ pub fn hoist_common_variants(src: &str, symbol: &str) -> Vec<String> {
             for n in occ {
                 edits.push(Edit::replace(&c, n, name.clone()));
             }
-            if let Some(s) = apply(src, &edits) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &edits));
         }
     }
     out
@@ -1658,7 +1495,7 @@ pub fn hoist_common_variants(src: &str, symbol: &str) -> Vec<String> {
 /// C89 form of a candidate: declarations after the first statement of a block move to the
 /// block's start (`T x = v;` becomes `T x;` there and `x = v;` in place), as C units require.
 pub fn c89_decls(src: &str, symbol: &str) -> Option<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let def = crate::func::find_target(&c, symbol)?;
     let body = c.child(def, "body")?;
@@ -1706,14 +1543,13 @@ pub fn c89_decls(src: &str, symbol: &str) -> Option<String> {
     if edits.is_empty() {
         return Some(src.to_string());
     }
-    let s = apply(src, &edits)?;
-    (Cst::parse(&s).errors <= c.errors).then_some(s)
+    crate::cst::apply_checked(src, &c, &edits)
 }
 
 /// A loop that only polls memory (`while (g.flag != 0) {}`) reading it through a volatile lvalue
 /// (`*(volatile __typeof__(g.flag)*)&g.flag`): the target re-reads it every iteration.
 pub fn volatile_poll_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1741,17 +1577,14 @@ pub fn volatile_poll_variants(src: &str, symbol: &str) -> Vec<String> {
     if edits.is_empty() {
         return vec![];
     }
-    match apply(src, &edits) {
-        Some(s) if Cst::parse(&s).errors <= c.errors => vec![s],
-        _ => vec![],
-    }
+    crate::cst::apply_checked(src, &c, &edits).into_iter().collect()
 }
 
 /// A value stored to memory right after it is computed and used again later (`t = f(); g = t;
 /// h(t);`) read back from where it was stored instead (`g = f(); h(g);`): the compiler forwards
 /// the stored value, so the call result stays where the store put it.
 pub fn store_reuse_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1792,7 +1625,7 @@ pub fn store_reuse_variants(src: &str, symbol: &str) -> Vec<String> {
             if c.text(r2) != name || (c.kind(l2) == "identifier" && info.vars.contains_key(c.text(l2))) || c.descendants(l2).into_iter().any(|d| matches!(c.kind(d), "call_expression")) {
                 continue;
             }
-            if !info.vars.get(&name).is_some_and(|v| !v.is_param) {
+            if info.vars.get(&name).is_none_or(|v| v.is_param) {
                 continue;
             }
             // later uses (all in one later statement, nothing in between writing memory or calling)
@@ -1814,11 +1647,7 @@ pub fn store_reuse_variants(src: &str, symbol: &str) -> Vec<String> {
                 edits.push(Edit::replace(&c, u, lt.clone()));
             }
             let _ = decl;
-            if let Some(s) = apply(src, &edits) {
-                if Cst::parse(&s).errors <= c.errors {
-                    out.push(s);
-                }
-            }
+            out.extend(crate::cst::apply_checked(src, &c, &edits));
         }
     }
     out
@@ -1828,7 +1657,7 @@ pub fn store_reuse_variants(src: &str, symbol: &str) -> Vec<String> {
 /// (`n = v.size(); for (i = 0; i < n; i++)`) read in the condition itself (`i < v.size()`): the
 /// compiler hoists it anyway, but creates the value at another point.
 pub fn loop_bound_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1853,7 +1682,7 @@ pub fn loop_bound_variants(src: &str, symbol: &str) -> Vec<String> {
             }
             _ => continue,
         };
-        if !info.vars.get(&name).is_some_and(|v| !v.is_param) || c.descendants(val).into_iter().any(|d| matches!(c.kind(d), "assignment_expression" | "update_expression")) {
+        if info.vars.get(&name).is_none_or(|v| v.is_param) || c.descendants(val).into_iter().any(|d| matches!(c.kind(d), "assignment_expression" | "update_expression")) {
             continue;
         }
         // all reads inside one loop that writes no memory and calls nothing but accessors (the
@@ -1879,11 +1708,7 @@ pub fn loop_bound_variants(src: &str, symbol: &str) -> Vec<String> {
         for &u in &reads {
             edits.push(Edit::replace(&c, u, c.text(val).to_string()));
         }
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     }
     out
 }
@@ -1892,7 +1717,7 @@ pub fn loop_bound_variants(src: &str, symbol: &str) -> Vec<String> {
 /// before it (`T l0 = a->x; T l1 = a->y; ...`): every value is then loaded up front, as when the
 /// source copied the fields first.
 pub fn hoist_loads_variants(src: &str, symbol: &str) -> Vec<String> {
-    use crate::cst::{apply, Cst, Edit};
+    use crate::cst::{Cst, Edit};
     let c = Cst::parse(src);
     let Some(def) = crate::func::find_target(&c, symbol) else { return vec![] };
     let Some(info) = crate::func::FuncInfo::analyze(&c, def) else { return vec![] };
@@ -1904,7 +1729,7 @@ pub fn hoist_loads_variants(src: &str, symbol: &str) -> Vec<String> {
             _ => None,
         };
         let Some(cond) = cond else { continue };
-        if !c.parent(st).is_some_and(|p| c.kind(p) == "compound_statement") {
+        if c.parent(st).is_none_or(|p| c.kind(p) != "compound_statement") {
             continue;
         }
         let logical = c.descendants(cond).into_iter().any(|d| c.kind(d) == "binary_expression" && matches!(c.op(d), Some("||" | "&&")));
@@ -1940,11 +1765,7 @@ pub fn hoist_loads_variants(src: &str, symbol: &str) -> Vec<String> {
             edits.push(Edit::replace(&c, n, name));
         }
         edits.push(Edit::insert(at, decls));
-        if let Some(s) = apply(src, &edits) {
-            if Cst::parse(&s).errors <= c.errors {
-                out.push(s);
-            }
-        }
+        out.extend(crate::cst::apply_checked(src, &c, &edits));
     }
     out
 }
@@ -2277,7 +2098,7 @@ pub fn repair(scorer: &Scorer, src: &str, fit: &Fitness, tracer: Option<&crate::
     let mut best: Option<Scored> = None;
     let consider = |best: &mut Option<Scored>, v: &[Scored]| {
         for s in v {
-            if best.as_ref().map_or(true, |b| s.fit.better_than(&b.fit)) {
+            if best.as_ref().is_none_or(|b| s.fit.better_than(&b.fit)) {
                 *best = Some(Scored { src: s.src.clone(), fit: s.fit.clone(), ops: s.ops.clone() });
             }
         }
