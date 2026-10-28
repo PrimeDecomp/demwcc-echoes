@@ -7,9 +7,11 @@
 //!   `mwcc_wasm::PersistPool`).
 //! - GC 2.6 and 2.7 always run as their module: [`loaded`] is an error, with the command that builds it, when the
 //!   module is missing or does not load. Other compilers (the SDK's GC 1.x) run as processes.
-//! - The module is found in an mwcc-tools checkout (https://github.com/PrimeDecomp/mwcc-tools) that has it, from a
-//!   release's `mwcc-wasm-GC_2_7-*.zip` unpacked into it or built there: `MWDEC_MWCC_TOOLS`, else `MWCC_ORACLE_ROOT`
-//!   (the kits' name for it), else `mwcc-tools` next to this checkout. The crates come from that repository's Git
+//! - The module is found in an mwcc-tools root (https://github.com/PrimeDecomp/mwcc-tools): `MWDEC_MWCC_TOOLS`, else
+//!   `MWCC_ORACLE_ROOT` (the kits' name for it; a checkout with the release's `mwcc-wasm-GC_2_7-*.zip` unpacked or
+//!   built in it), else mwdec's own cache directory. A root that lacks the module gets it from the `mwcc-tools`
+//!   executable (`MWCC_TOOLS`, else the PATH's), which mwdec requires: `mwcc-tools download wasm VERSION --root ROOT`,
+//!   once per process (`MWCC_WASM_DOWNLOAD=0` turns that off). The crates come from that repository's Git
 //!   (Cargo.toml), so no checkout is needed to build.
 //! - mwcc-wasm's registry loads it once per process, from the compiled artifact its build writes beside it
 //!   (`mwcc.cache/`), with the version information beside it (`mwcc.version`). Each run instantiates it afresh (the
@@ -35,12 +37,38 @@ pub struct Run {
 /// A module ready to run, with the version information of the executable it stands for.
 pub type Loaded = mwcc_wasm::Loaded;
 
-/// The mwcc-tools checkout that has the modules.
+/// The mwcc-tools root that has the modules: the named checkout, else mwdec's cache directory.
 fn mwcc_tools() -> PathBuf {
-    match std::env::var_os("MWDEC_MWCC_TOOLS").or_else(|| std::env::var_os("MWCC_ORACLE_ROOT")) {
-        Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../mwcc-tools"),
+    if let Some(p) = std::env::var_os("MWDEC_MWCC_TOOLS").or_else(|| std::env::var_os("MWCC_ORACLE_ROOT")) {
+        return PathBuf::from(p);
     }
+    let cache = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let home = PathBuf::from(std::env::var_os("HOME")?);
+            Some(if cfg!(target_os = "macos") { home.join("Library/Caches") } else { home.join(".cache") })
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    cache.join("mwdec/mwcc-tools")
+}
+
+/// Download VERSION's module (`GC_2_7`) into the root with the `mwcc-tools` executable, which mwdec requires. Err: the
+/// reason it did not (downloading is off, no executable, or the download failed).
+fn download(version: &str) -> Result<()> {
+    if std::env::var("MWCC_WASM_DOWNLOAD").is_ok_and(|v| v == "0") {
+        bail!("MWCC_WASM_DOWNLOAD=0 does not download");
+    }
+    let tool = std::env::var_os("MWCC_TOOLS").unwrap_or_else(|| "mwcc-tools".into());
+    let output = std::process::Command::new(&tool)
+        .args(["download", "wasm", version, "--root"])
+        .arg(mwcc_tools())
+        .output()
+        .map_err(|e| anyhow!("cannot run {} (MWCC_TOOLS names the mwcc-tools executable): {e}", PathBuf::from(&tool).display()))?;
+    if !output.status.success() {
+        bail!("{} download wasm {version} failed: {}", PathBuf::from(&tool).display(), String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
 }
 
 /// The version directory (`GC_2_7`) of a compiler `exe` (`.../GC/2.7/mwcceppc.exe`) that mwcc-tools builds a
@@ -60,11 +88,11 @@ pub fn module_for(exe: &Path) -> Option<PathBuf> {
     module_version(exe).map(|v| mwcc_tools().join(format!("build/{v}/wasm/mwcc.wasm")))
 }
 
-/// How to build the module of `exe`.
+/// How to get the module of `exe`.
 fn build_hint(exe: &Path) -> String {
     let version = module_version(exe).unwrap_or_default();
     format!(
-        "unpack an mwcc-tools release's mwcc-wasm-{version}-*.zip into the mwcc-tools checkout {} (GC_2_7; https://github.com/PrimeDecomp/mwcc-tools/releases), or build it there with `ninja build/{version}/wasm/mwcc.wasm`; MWDEC_MWCC_TOOLS (else MWCC_ORACLE_ROOT) names another checkout",
+        "run `mwcc-tools download wasm {version} --root {}` (MWCC_TOOLS names the mwcc-tools executable; MWDEC_MWCC_TOOLS, else MWCC_ORACLE_ROOT, names another root), or unpack a release's mwcc-wasm-{version}-*.zip into it",
         mwcc_tools().display()
     )
 }
@@ -76,6 +104,18 @@ pub fn loaded(exe: &Path) -> Result<Option<Arc<Loaded>>> {
     let Some(module) = module_for(exe) else { return Ok(None) };
     if let Some(e) = FAILED.get_or_init(Default::default).lock().unwrap().get(&module) {
         bail!("{e}");
+    }
+    if !module.exists() {
+        // (the module's version is the exe's: a root without it gets the release's from mwcc-tools, once)
+        static TRIED: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+        let mut tried = TRIED.get_or_init(Default::default).lock().unwrap();
+        let outcome = tried.entry(module.clone()).or_insert_with(|| match download(&module_version(exe).unwrap_or_default()) {
+            Ok(()) => String::new(),
+            Err(e) => format!("{e:#}"),
+        });
+        if !outcome.is_empty() && !module.exists() {
+            eprintln!("mwdec: could not download {}: {outcome}", module.display());
+        }
     }
     let error = if !module.exists() {
         format!("{} runs as mwcc-tools' module {}, which is missing: {}", exe.display(), module.display(), build_hint(exe))
@@ -235,4 +275,27 @@ fn execute_with(
             &|| cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)),
         )
         .map_err(|e| anyhow!("{e:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A root without the module gets it from mwcc-tools (the executable `MWCC_TOOLS` names; skipped without one, since
+    /// it downloads from the release).
+    #[test]
+    fn a_root_without_the_module_downloads_it() {
+        let Some(tool) = std::env::var_os("MWCC_TOOLS") else { return };
+        if !Path::new(&tool).is_file() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mwdec-wasm-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("MWDEC_MWCC_TOOLS", &root);
+        let exe = Path::new("build/compilers/GC/2.7/mwcceppc.exe");
+        let loaded = loaded(exe).expect("the module downloads and loads");
+        assert!(loaded.is_some());
+        assert!(root.join("build/GC_2_7/wasm/mwcc.wasm").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
