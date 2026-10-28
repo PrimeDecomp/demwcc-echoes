@@ -975,15 +975,48 @@ pub struct MatchArgs {
     pub out: Option<PathBuf>,
     pub no_locate: bool,
     pub disable_ops: Option<String>,
+    pub deadline_secs: Option<u64>,
+    pub no_ablate: bool,
+}
+
+/// The run's hard limit (`--deadline-secs`): a thread that ends the process once it is past, whatever runs (setup,
+/// a compile that ignores its cancel flag, a post-pass). The job object (`mwdec_core::memcap`) ends its compiler
+/// processes with it; best.cpp is as the search last saved it.
+fn hard_deadline(secs: u64) -> Instant {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    std::thread::spawn(move || {
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        eprintln!("mwdec: past the run's deadline ({secs}s, --deadline-secs); ending");
+        let _ = std::io::stdout().flush();
+        std::process::exit(3);
+    });
+    deadline
+}
+
+/// objdiff's match of `symbol` in `src`'s object against the target's (report.json's `fuzzy_match_percent` for
+/// the function: relocations not compared), with a normal compile.
+fn objdiff_percent(root: &Path, u: &Unit, ui: &UnitInputs, symbol: &str, src: &str) -> Option<f32> {
+    let target = std::fs::read(root.join(&u.target_obj)).ok()?;
+    let ours = ui.mwcc.compile_in_normal(&ui.ctx, src).or_else(|_| ui.mwcc.compile_in_normal(&ui.plain, src)).ok()?;
+    let options = mwcc_compare::ScoreOptions { symbols: Some(vec![symbol.to_string()]), ..Default::default() };
+    let score = mwcc_compare::score::score_with(&target, &ours.obj, &mwcc_compare::score::report_config(), &options).ok()?;
+    score.functions.iter().find(|f| f.name == symbol).and_then(|f| f.match_percent)
 }
 
 pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
+    let deadline = hard_deadline(a.deadline_secs.unwrap_or(a.budget_secs + (a.budget_secs / 2).max(60)));
     let p = load_project(root)?;
     let u = find_unit(&p, &a.unit)?;
     let cc = Compilers::new(root, work, a.workers.clamp(1, 6));
     let t = Instant::now();
     let (t_ext, o_ext) = externs_for(&p, &u.name);
     let ui = unit_inputs(&p, u, &cc, &t_ext.objects, !a.no_db && a.init.is_none(), Some(&t_ext))?;
+    // (the headers as they are now, for the whole run: another session's edits do not taint it)
+    match ui.mwcc.snapshot_headers(&ui.ctx) {
+        Ok(Some(n)) => eprintln!("headers: {n} files kept as they are now"),
+        Ok(None) => {}
+        Err(e) => eprintln!("headers: not kept ({e}); a header edited during the run changes its compiles"),
+    }
     let f = mwdec_obj::find_function(&ui.target, &a.symbol).ok_or_else(|| anyhow!("{} not in {}", a.symbol, u.target_obj))?;
     let init = match &a.init {
         Some(path) => std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
@@ -1039,6 +1072,37 @@ pub fn cmd_match(root: &Path, work: &Path, a: MatchArgs) -> Result<()> {
         eprintln!("naturalness: {} -> {}", before.summary(), mwdec_emit::tidy::measure(&r.best_src).summary());
         let _ = std::fs::create_dir_all(&out);
         let _ = std::fs::write(out.join("polished.cpp"), &r.best_src);
+    }
+    let mut extra = serde_json::Map::new();
+    if let (false, false, Some(goal)) = (a.no_ablate, r.exact, r.best.clone()) {
+        if r.best_src != init {
+            let ab = crate::ablate::ablate(&scorer, &init, &r.best_src, &goal, deadline - Duration::from_secs(5));
+            eprintln!(
+                "ablation: {} of the search's edits carry its gain ({} line hunks; {} evals{}): {}",
+                ab.kept.len(),
+                ab.edits,
+                ab.evals,
+                if ab.cut_short { ", cut short by the deadline" } else { "" },
+                out.join("ablated.cpp").display()
+            );
+            let _ = std::fs::create_dir_all(&out);
+            let _ = std::fs::write(out.join("ablated.cpp"), &ab.src);
+            extra.insert("ablation".into(), serde_json::to_value(&ab).unwrap_or_default());
+            r.best_src = ab.src.clone();
+        }
+    }
+    let objdiff = objdiff_percent(root, u, &ui, &a.symbol, &r.best_src);
+    if let Some(m) = objdiff {
+        eprintln!("objdiff: {m:.2}% (report.json's match of the function)");
+    }
+    extra.insert("objdiff_match_percent".into(), serde_json::json!(objdiff));
+    // (result.json: the search's result, the ablation and objdiff's match)
+    let result = out.join("result.json");
+    let mut doc = std::fs::read_to_string(&result).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
+    if let Some(d) = doc.as_object_mut() {
+        d.extend(extra);
+        let _ = std::fs::create_dir_all(&out);
+        let _ = std::fs::write(&result, serde_json::to_string_pretty(&doc).unwrap_or_default());
     }
     print!("{}", r.best_src);
     if !r.best_src.ends_with('\n') {

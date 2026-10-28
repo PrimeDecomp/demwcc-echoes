@@ -446,6 +446,30 @@ impl Mwcc {
         Ok((status.success(), status.code(), messages, ms))
     }
 
+    /// Keep the files `ctx`'s context reads under the project root (headers; not the work dir's) as they are now,
+    /// for the process's in-process compiles ([`mwdec_oracle::wasm::snapshot_reads`]): a header edited while a run
+    /// searches does not taint it. `Ok(None)`: a process compiler (it reads the disk), or a snapshot already kept.
+    pub fn snapshot_headers(&self, ctx: &UnitContext) -> Result<Option<usize>, MwccError> {
+        let dir = self.work.join("tmp");
+        std::fs::create_dir_all(&dir).map_err(io("creating work dir"))?;
+        let stem = dir.join(self.unique("snapshot"));
+        let ext = ctx.tu_name.as_deref().and_then(|n| Path::new(n).extension()).and_then(|e| e.to_str()).unwrap_or("cpp");
+        let (src, obj) = (stem.with_extension(ext), stem.with_extension("o"));
+        std::fs::write(&src, format!("{}\n{}", ctx.context, ctx.text)).map_err(io("writing TU"))?;
+        let mut args = ctx.cflags.clone();
+        args.extend(["-c".into(), win_path(&src), "-o".into(), win_path(&obj)]);
+        let lower = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+        let (root, work) = (lower(&self.root), lower(&self.work));
+        let keep = |p: &Path| {
+            let p = lower(p);
+            p.starts_with(&root) && !p.starts_with(&work)
+        };
+        let kept = mwdec_oracle::wasm::snapshot_reads(&self.root.join(&self.compiler), &args, &self.root, self.timeout, &keep);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&obj);
+        kept.map_err(|e| MwccError::Io(format!("{e:#}")))
+    }
+
     /// Compile a full TU `source` with `cflags` (+ optional `-prefix <mch>`), writing into
     /// `work_dir`. No caching. The object is left at the returned path.
     pub fn compile_tu(

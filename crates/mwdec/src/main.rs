@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+mod ablate;
 mod draft_server;
 mod autoctx;
 mod ctxext;
@@ -126,6 +127,13 @@ enum Cmd {
         /// Comma-separated operator names to disable (ablations).
         #[arg(long)]
         disable_ops: Option<String>,
+        /// The whole run's hard limit, setup and post-passes included: past it the process ends (status 3), its
+        /// best.cpp as last saved (default: the budget plus half of it, at least a minute more).
+        #[arg(long)]
+        deadline_secs: Option<u64>,
+        /// Keep the search's best as it is: no pass reverting the edits it does not need (ablated.cpp).
+        #[arg(long)]
+        no_ablate: bool,
     },
     /// Draft + search over functions NOT yet matched in report.json (smallest first); keeps every
     /// exact result (JSONL + per-function .cpp). Resumable; restarts itself after crashes.
@@ -315,10 +323,10 @@ fn real_main() -> Result<()> {
         Cmd::Context { unit } => cmd_context(&root, &unit),
         Cmd::CtxCheck { unit, jobs } => cmd_ctx_check(&root, &work, unit.as_deref(), jobs),
         Cmd::BenchCompile { unit, n, jobs } => cmd_bench_compile(&root, &work, &unit, n, jobs),
-        Cmd::Match { unit, symbol, budget_secs, init, max_compiles, workers, seed, no_db, verbose, out, no_locate, disable_ops } => search_cmds::cmd_match(
+        Cmd::Match { unit, symbol, budget_secs, init, max_compiles, workers, seed, no_db, verbose, out, no_locate, disable_ops, deadline_secs, no_ablate } => search_cmds::cmd_match(
             &root,
             &cli.work.clone().unwrap_or_else(search_cmds::search_work),
-            search_cmds::MatchArgs { unit, symbol, budget_secs, init, max_compiles, workers, seed, no_db, verbose, out, no_locate, disable_ops },
+            search_cmds::MatchArgs { unit, symbol, budget_secs, init, max_compiles, workers, seed, no_db, verbose, out, no_locate, disable_ops, deadline_secs, no_ablate },
         ),
         Cmd::InlineWhy { unit, symbol, list, out } => inline_why::cmd_inline_why(&root, &work, unit, symbol, list, out),
         Cmd::DraftServer { no_db } => draft_server::serve(&root, &cli.work.clone().unwrap_or_else(search_cmds::search_work), no_db),

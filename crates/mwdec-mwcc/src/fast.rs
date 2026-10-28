@@ -157,7 +157,8 @@ impl FastPool {
             program: std::path::absolute(&exe).unwrap_or(exe).to_string_lossy().into_owned(),
             source,
             text: spec.context.clone(),
-            overlay: mwcc_wasm::Overlay::new(),
+            // (the headers as the run's start read them, once kept: mwdec_oracle::wasm::snapshot_reads)
+            overlay: mwdec_oracle::wasm::snapshot().cloned().unwrap_or_default(),
             transcode_sjis: false,
         });
         contexts.insert(spec.key, context.clone());
