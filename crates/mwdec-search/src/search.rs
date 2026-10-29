@@ -779,7 +779,9 @@ pub fn search(scorer: &Scorer, init: &str, cfg: &SearchConfig) -> SearchResult {
                         let mut g = state.lock().unwrap();
                         g.gen_failures += 1;
                         if g.gen_failures > 200 && g.evals < 2 && init_diag_done.load(Ordering::Relaxed) && g.priority.is_empty() {
-                            stop.store(true, Ordering::Relaxed);
+                            if !stop.swap(true, Ordering::Relaxed) {
+                                eprintln!("  stopped: no operator applies to {}", target_head(&init_src, symbol));
+                            }
                         }
                         continue;
                     }
@@ -1019,6 +1021,18 @@ pub fn polish(scorer: &Scorer, src: &str, max_evals: usize, seed: u64) -> (Strin
         }
     }
     (cur, accepted)
+}
+
+/// The first line of the definition the operators work on (for messages).
+fn target_head(src: &str, symbol: &str) -> String {
+    let cst = crate::cst::Cst::parse(src);
+    match crate::func::find_target(&cst, symbol) {
+        Some(d) => {
+            let line = src[..cst.nodes[d].start].matches('\n').count() + 1;
+            format!("the definition at line {line}: {}", cst.text(d).lines().next().unwrap_or("").trim())
+        }
+        None => "nothing (no definition found)".into(),
+    }
 }
 
 #[cfg(test)]

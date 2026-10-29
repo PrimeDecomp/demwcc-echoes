@@ -111,23 +111,201 @@ pub fn function_defs(cst: &Cst) -> Vec<usize> {
     (0..cst.nodes.len()).filter(|&i| cst.kind(i) == "function_definition" && cst.child(i, "body").is_some()).collect()
 }
 
-/// The function definition to permute for mangled `symbol`: the definition whose name matches
-/// the mangled base name (constructors/destructors by class name), else the last definition.
+/// The function definition to permute for mangled `symbol`: among the definitions whose name
+/// matches the mangled base name (constructors/destructors by class name), those of the mangled
+/// class, then those with the mangled parameter count; the last of the narrowest non-empty set.
+/// With no name match, the last definition.
+///
+/// An init file can hold several constructors (inline sub-object constructors kept for a
+/// constructor target, the target's own overloads), so the class and the parameter count matter.
 pub fn find_target(cst: &Cst, symbol: &str) -> Option<usize> {
     let defs = function_defs(cst);
     let base = mangled_base(symbol);
-    let pick = defs.iter().copied().filter(|&d| {
-        let Some((name, scope)) = def_name(cst, d) else { return false };
-        let scope_last = scope.as_deref().map(|s| s.rsplit("::").next().unwrap_or(s).to_string());
-        match base {
-            "__ct" => scope_last.as_deref() == Some(name.as_str()),
-            "__dt" => name.starts_with('~'),
-            b if b.starts_with("__") => name.starts_with("operator") || name == b,
-            b => name == b,
+    let sig = MangledSig::parse(symbol);
+    let named: Vec<(usize, String, Option<String>)> = defs
+        .iter()
+        .copied()
+        .filter_map(|d| {
+            let (name, scope) = def_name(cst, d)?;
+            let scope_last = scope.as_deref().map(|s| s.rsplit("::").next().unwrap_or(s).to_string());
+            let ok = match base {
+                "__ct" => scope_last.as_deref() == Some(name.as_str()),
+                "__dt" => name.starts_with('~'),
+                b if b.starts_with("__") => name.starts_with("operator") || name == b,
+                b => name == b,
+            };
+            ok.then_some((d, name, scope))
+        })
+        .collect();
+    let mut pick: Vec<usize> = named.iter().map(|x| x.0).collect();
+    if let Some(sig) = &sig {
+        if let Some(class) = &sig.class {
+            let same: Vec<usize> =
+                named.iter().filter(|(_, _, scope)| scope.as_deref().is_some_and(|s| scope_matches(s, class))).map(|x| x.0).collect();
+            if !same.is_empty() {
+                pick = same;
+            }
         }
-    });
-    let v: Vec<usize> = pick.collect();
-    v.last().copied().or_else(|| defs.last().copied())
+        if let Some(n) = sig.params {
+            let arity: Vec<usize> = pick.iter().copied().filter(|&d| def_param_count(cst, d) == Some(n)).collect();
+            if !arity.is_empty() {
+                pick = arity;
+            }
+        }
+    }
+    pick.last().copied().or_else(|| defs.last().copied())
+}
+
+/// Does a definition's scope text (`CSandworm::SEyeEffects`, maybe inside a namespace block)
+/// name `class` (the mangled qualified class, `CSandworm::SEyeEffects`)? The scope may omit
+/// leading namespaces, so it must be a `::`-aligned suffix.
+fn scope_matches(scope: &str, class: &str) -> bool {
+    let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let (s, c) = (norm(scope), norm(class));
+    let s = s.trim_start_matches("::");
+    // template arguments are spelled differently in source and mangled names: compare bare names
+    let bare = |x: &str| x.split("::").map(|p| p.split('<').next().unwrap_or(p).to_string()).collect::<Vec<_>>();
+    let (s, c) = (bare(s), bare(&c));
+    s.len() <= c.len() && c[c.len() - s.len()..] == s[..]
+}
+
+/// Number of parameters of a function definition (`(void)` is none); `None` with `...`.
+fn def_param_count(cst: &Cst, def: usize) -> Option<usize> {
+    let fd = cst.descendants(cst.child(def, "declarator")?).into_iter().find(|&n| cst.kind(n) == "function_declarator")?;
+    let pl = cst.child(fd, "parameters")?;
+    let mut n = 0;
+    for p in cst.named(pl) {
+        match cst.kind(p) {
+            "parameter_declaration" | "optional_parameter_declaration" => {
+                if cst.child(p, "declarator").is_none() && cst.text(p).trim() == "void" {
+                    continue;
+                }
+                n += 1;
+            }
+            "variadic_parameter_declaration" => return None,
+            _ => {}
+        }
+    }
+    if cst.text(pl).contains("...") {
+        return None;
+    }
+    Some(n)
+}
+
+/// What a CodeWarrior mangled name says about the function's class and parameters.
+#[derive(Debug, PartialEq)]
+struct MangledSig {
+    /// Qualified class, e.g. `CSandworm::SEyeEffects` (`None` for a free function).
+    class: Option<String>,
+    /// Parameter count (`None` when the signature can't be read, or is variadic).
+    params: Option<usize>,
+}
+
+impl MangledSig {
+    fn parse(sym: &str) -> Option<MangledSig> {
+        let base = mangled_base(sym);
+        let rest = sym.get(base.len()..)?.strip_prefix("__")?;
+        let b = rest.as_bytes();
+        let mut i = 0;
+        let class = match b.first()? {
+            b'Q' | b'0'..=b'9' => Some(read_qualified(rest, &mut i)?),
+            _ => None,
+        };
+        if b.get(i) == Some(&b'C') {
+            i += 1;
+        }
+        if b.get(i) != Some(&b'F') {
+            return Some(MangledSig { class, params: None });
+        }
+        i += 1;
+        Some(MangledSig { class, params: count_params(rest, &mut i, false) })
+    }
+}
+
+/// `9CSandworm` or `Q29CSandworm10SEyeEffect` -> `CSandworm` / `CSandworm::SEyeEffect`.
+fn read_qualified(s: &str, i: &mut usize) -> Option<String> {
+    let b = s.as_bytes();
+    if b.get(*i) == Some(&b'Q') {
+        let n = (*b.get(*i + 1)? as char).to_digit(10)? as usize;
+        *i += 2;
+        let mut parts = vec![];
+        for _ in 0..n {
+            parts.push(read_name(s, i)?);
+        }
+        Some(parts.join("::"))
+    } else {
+        read_name(s, i)
+    }
+}
+
+fn read_name(s: &str, i: &mut usize) -> Option<String> {
+    let b = s.as_bytes();
+    let start = *i;
+    while b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+        *i += 1;
+    }
+    let len: usize = s.get(start..*i)?.parse().ok()?;
+    let name = s.get(*i..*i + len)?.to_string();
+    *i += len;
+    Some(name)
+}
+
+/// Count parameter types up to the end (or `_` inside a function type).
+fn count_params(s: &str, i: &mut usize, in_fn: bool) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.get(*i) == Some(&b'v') && (*i + 1 == b.len() || (in_fn && b.get(*i + 1) == Some(&b'_'))) {
+        *i += 1;
+        return Some(0);
+    }
+    let mut n = 0;
+    while *i < b.len() && !(in_fn && b[*i] == b'_') {
+        if b[*i] == b'e' {
+            return None;
+        }
+        skip_type(s, i)?;
+        n += 1;
+    }
+    Some(n)
+}
+
+fn skip_type(s: &str, i: &mut usize) -> Option<()> {
+    let b = s.as_bytes();
+    loop {
+        match *b.get(*i)? {
+            b'C' | b'V' | b'P' | b'R' | b'U' | b'S' => *i += 1,
+            b'Q' | b'0'..=b'9' => return read_qualified(s, i).map(|_| ()),
+            b'F' => {
+                *i += 1;
+                count_params(s, i, true)?;
+                if b.get(*i) != Some(&b'_') {
+                    return None;
+                }
+                *i += 1;
+                return skip_type(s, i);
+            }
+            b'A' => {
+                *i += 1;
+                while b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+                    *i += 1;
+                }
+                if b.get(*i) != Some(&b'_') {
+                    return None;
+                }
+                *i += 1;
+                return skip_type(s, i);
+            }
+            b'M' => {
+                *i += 1;
+                read_qualified(s, i)?;
+                return skip_type(s, i);
+            }
+            b'v' | b'b' | b'c' | b's' | b'i' | b'l' | b'x' | b'f' | b'd' | b'r' | b'w' => {
+                *i += 1;
+                return Some(());
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn type_prefix(cst: &Cst, decl: usize, first_declarator: usize) -> String {
@@ -416,3 +594,61 @@ pub fn temp_type(cst: &Cst, info: &FuncInfo, n: usize) -> String {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRC: &str = r#"
+inline CSandworm::SPincerData::SPincerData(int l, int r, float s) : mL(l), mR(r), mS(s) {}
+CSandworm::CSandworm(int a, int b) : mA(a) { Load(b); }
+CSandworm::CSandworm(int a, int b, float c) : mA(a), mMode(0) { Init(b, c); }
+CSandworm::~CSandworm() {}
+void CSandworm::Initialize() {}
+CSandwormEye::CSandwormEye(int a) : mA(a) {}
+CSandwormEye::~CSandwormEye() {}
+CSandworm::SEyeEffects::SEyeEffects(int g, int e1, int e2) {}
+CSandworm::SEyeEffects::~SEyeEffects() {}
+"#;
+
+    fn line_of(cst: &Cst, def: usize) -> &str {
+        cst.text(def).lines().next().unwrap()
+    }
+
+    #[test]
+    fn mangled_sig() {
+        assert_eq!(
+            MangledSig::parse("__ct__9CSandwormFiif"),
+            Some(MangledSig { class: Some("CSandworm".into()), params: Some(3) })
+        );
+        assert_eq!(
+            MangledSig::parse("__dt__Q29CSandworm11SEyeEffectsFv"),
+            Some(MangledSig { class: Some("CSandworm::SEyeEffects".into()), params: Some(0) })
+        );
+        assert_eq!(
+            MangledSig::parse("GetShakeAngle__9CSandwormCFfff"),
+            Some(MangledSig { class: Some("CSandworm".into()), params: Some(3) })
+        );
+        assert_eq!(
+            MangledSig::parse("LoadSandworm__FR13CStateManagerR12CInputStreamR11CEntityInfo"),
+            Some(MangledSig { class: None, params: Some(3) })
+        );
+        // template names carry their arguments inside the length; function pointers and arrays
+        let s = "__ct__9CSandwormF9TUniqueIdRCQ24rstl66basic_string<c,Q24rstl14char_traits<c>,Q24rstl17rmemory_allocator>PFi_vA3_fM6CClassFPCvPvi_v";
+        assert_eq!(MangledSig::parse(s).unwrap().params, Some(5));
+    }
+
+    #[test]
+    fn picks_class_and_overload() {
+        let cst = Cst::parse(SRC);
+        let t = |sym: &str| line_of(&cst, find_target(&cst, sym).unwrap()).to_string();
+        assert!(t("__ct__9CSandwormFiif").starts_with("CSandworm::CSandworm(int a, int b, float c)"));
+        assert!(t("__ct__9CSandwormFii").starts_with("CSandworm::CSandworm(int a, int b)"));
+        assert!(t("__dt__9CSandwormFv").starts_with("CSandworm::~CSandworm"));
+        assert!(t("__ct__12CSandwormEyeFi").starts_with("CSandwormEye::CSandwormEye"));
+        assert!(t("__ct__Q29CSandworm11SPincerDataFiif").starts_with("inline CSandworm::SPincerData::SPincerData"));
+        assert!(t("Initialize__9CSandwormFv").starts_with("void CSandworm::Initialize"));
+        // no name match: the last definition
+        assert!(t("Missing__9CSandwormFv").starts_with("CSandworm::SEyeEffects::~SEyeEffects"));
+    }
+}

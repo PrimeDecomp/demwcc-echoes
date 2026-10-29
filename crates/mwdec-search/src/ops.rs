@@ -2713,7 +2713,11 @@ impl<'s> Parsed<'s> {
         let cst = Cst::parse(src);
         let def = func::find_target(&cst, symbol)?;
         let info = FuncInfo::analyze(&cst, def)?;
-        let nodes = cst.descendants(info.body);
+        // A constructor's member initialisers are code too (often all of it): expression-level operators get
+        // sites there; statement-level ones find no statement and skip them.
+        let mut nodes: Vec<usize> =
+            cst.named(def).into_iter().filter(|&n| cst.kind(n) == "field_initializer_list").flat_map(|n| cst.descendants(n)).collect();
+        nodes.extend(cst.descendants(info.body));
         Some(Parsed { src, symbol, cst, info, nodes, ctx: None })
     }
 
