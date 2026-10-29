@@ -163,8 +163,20 @@ fn scope_matches(scope: &str, class: &str) -> bool {
     let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let (s, c) = (norm(scope), norm(class));
     let s = s.trim_start_matches("::");
-    // template arguments are spelled differently in source and mangled names: compare bare names
-    let bare = |x: &str| x.split("::").map(|p| p.split('<').next().unwrap_or(p).to_string()).collect::<Vec<_>>();
+    // template arguments are spelled differently in source and mangled names (and may hold `::`):
+    // drop them, then compare the names
+    let bare = |x: &str| {
+        let (mut out, mut depth) = (String::new(), 0usize);
+        for ch in x.chars() {
+            match ch {
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => out.push(ch),
+                _ => {}
+            }
+        }
+        out.split("::").map(String::from).collect::<Vec<_>>()
+    };
     let (s, c) = (bare(s), bare(&c));
     s.len() <= c.len() && c[c.len() - s.len()..] == s[..]
 }
@@ -648,6 +660,8 @@ CSandworm::SEyeEffects::~SEyeEffects() {}
         assert!(t("__ct__12CSandwormEyeFi").starts_with("CSandwormEye::CSandwormEye"));
         assert!(t("__ct__Q29CSandworm11SPincerDataFiif").starts_with("inline CSandworm::SPincerData::SPincerData"));
         assert!(t("Initialize__9CSandwormFv").starts_with("void CSandworm::Initialize"));
+        assert!(scope_matches("rstl::vector< rstl::pair< int, rstl::string > >", "rstl::vector<Q24rstl4pair<i,Q24rstl6string>>"));
+        assert!(!scope_matches("CSandwormEye", "CSandworm"));
         // no name match: the last definition
         assert!(t("Missing__9CSandwormFv").starts_with("CSandworm::SEyeEffects::~SEyeEffects"));
     }
